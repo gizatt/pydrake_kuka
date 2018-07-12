@@ -33,14 +33,11 @@ if __name__ == "__main__":
     parser.add_argument("-T", "--duration",
                         type=float,
                         help="Duration to run sim.",
-                        default=4.0)
+                        default=1000.0)
     parser.add_argument("--test",
                         action="store_true",
                         help="Help out CI by launching a meshcat server for "
                              "the duration of the test.")
-    parser.add_argument("--sim_type",
-                        type=str, default="cylinder_flipping",
-                        help="Options: [single_object, cylinder_flipping]")
     parser.add_argument("--seed",
                         type=float, default=time.time(),
                         help="RNG seed")
@@ -59,19 +56,17 @@ if __name__ == "__main__":
 
     # Construct the robot and its environment
     rbt = RigidBodyTree()
-    kuka_utils.setup_kuka(rbt)
+    world_builder = kuka_utils.ExperimentWorldBuilder()
+    world_builder.setup_kuka(rbt)
     rbt_just_kuka = rbt.Clone()
-    if args.sim_type == "single_object":
-        kuka_utils.add_block_to_tabletop(rbt)
-    elif args.sim_type == "cylinder_flipping":
-        kuka_utils.add_cut_cylinders_to_tabletop(rbt, 10)
-    else:
-        raise ValueError("Arg sim_type should be one of the options, "
-                         "try --help.")
+    world_builder.add_cut_cylinders_to_tabletop(rbt, 10)
     rbt.compile()
     rbt_just_kuka.compile()
-    q0 = kuka_utils.project_rbt_to_nearest_feasible_on_table(
-        rbt, rbt.getZeroConfiguration())
+    q0 = rbt.getZeroConfiguration()
+    # "Center low" from IIWA stored_poses.json from Spartan
+    q0[0:7] = [-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38]
+    q0 = world_builder.project_rbt_to_nearest_feasible_on_table(
+        rbt, q0)
 
     # Set up a visualizer for the robot
     pbrv = MeshcatRigidBodyVisualizer(rbt, draw_timestep=0.01)
@@ -81,24 +76,7 @@ if __name__ == "__main__":
     # Plan a robot motion to maneuver from the initial posture
     # to a posture that we know should grab the object.
     # (Grasp planning is left as an exercise :))
-    if args.sim_type == "single_object":
-        qtraj, info = kuka_ik.plan_grasping_trajectory(
-            rbt_just_kuka,
-            q0=q0[0:rbt_just_kuka.get_num_positions()],
-            target_reach_pose=np.array([0.6, 0., 1.0, -0.75, 0., -1.57]),
-            target_grasp_pose=np.array([0.8, 0., 0.9, -0.75, 0., -1.57]),
-            n_knots=20,
-            reach_time=1.5,
-            grasp_time=2.0)
-    else:
-        qtraj, info = kuka_ik.plan_grasping_trajectory(
-            rbt_just_kuka,
-            q0=q0[0:rbt_just_kuka.get_num_positions()],
-            target_reach_pose=np.array([0.6, -0.3, 0.8, -0.75, 0., -1.57]),
-            target_grasp_pose=np.array([0.9, 0.3, 0.8, -0.75, 0., -1.57]),
-            n_knots=20,
-            reach_time=1.5,
-            grasp_time=2.0)
+
     # Make our RBT into a plant for simulation
     rbplant = RigidBodyPlant(rbt)
     rbplant.set_name("Rigid Body Plant")
@@ -110,21 +88,12 @@ if __name__ == "__main__":
     # placed into it.
     rbplant_sys = builder.AddSystem(rbplant)
 
-    # Create a high-level state machine to guide the robot
-    # motion...
-    manip_state_machine = builder.AddSystem(
-        kuka_controllers.ManipStateMachine(rbt, rbplant_sys, qtraj))
-    builder.Connect(rbplant_sys.state_output_port(),
-                    manip_state_machine.robot_state_input_port)
-
-    # And spawn the controller that drives the Kuka to its
+    # Spawn the controller that drives the Kuka to its
     # desired posture.
     kuka_controller = builder.AddSystem(
         kuka_controllers.KukaController(rbt, rbplant_sys))
     builder.Connect(rbplant_sys.state_output_port(),
                     kuka_controller.robot_state_input_port)
-    builder.Connect(manip_state_machine.kuka_setpoint_output_port,
-                    kuka_controller.setpoint_input_port)
     builder.Connect(kuka_controller.get_output_port(0),
                     rbplant_sys.get_input_port(0))
 
@@ -133,10 +102,23 @@ if __name__ == "__main__":
         kuka_controllers.HandController(rbt, rbplant_sys))
     builder.Connect(rbplant_sys.state_output_port(),
                     hand_controller.robot_state_input_port)
-    builder.Connect(manip_state_machine.hand_setpoint_output_port,
-                    hand_controller.setpoint_input_port)
     builder.Connect(hand_controller.get_output_port(0),
                     rbplant_sys.get_input_port(1))
+
+    # Create a high-level state machine to guide the robot
+    # motion...
+    manip_state_machine = builder.AddSystem(
+        kuka_controllers.ManipStateMachine(
+            rbt, rbt_just_kuka, q0[0:9],
+            world_builder=world_builder,
+            hand_controller=hand_controller,
+            kuka_controller=kuka_controller))
+    builder.Connect(rbplant_sys.state_output_port(),
+                    manip_state_machine.robot_state_input_port)
+    builder.Connect(manip_state_machine.hand_setpoint_output_port,
+                    hand_controller.setpoint_input_port)
+    builder.Connect(manip_state_machine.kuka_setpoint_output_port,
+                    kuka_controller.setpoint_input_port)
 
     # Hook up the visualizer we created earlier.
     visualizer = builder.AddSystem(pbrv)
@@ -146,6 +128,7 @@ if __name__ == "__main__":
     # Add a camera, too, though no controller or estimator
     # will consume the output of it.
     # - Add frame for camera fixture.
+    '''
     camera_frame = RigidBodyFrame(
         name="rgbd camera frame", body=rbt.world(),
         xyz=[2.5, 0., 1.5], rpy=[-np.pi/4, 0., -np.pi])
@@ -164,6 +147,7 @@ if __name__ == "__main__":
                     camera_meshcat_visualizer.camera_input_port)
     builder.Connect(rbplant_sys.state_output_port(),
                     camera_meshcat_visualizer.state_input_port)
+    '''
 
     # Hook up loggers for the robot state, the robot setpoints,
     # and the torque inputs.
@@ -204,7 +188,7 @@ if __name__ == "__main__":
     # advancing once the gripper grasps the box.  Grasping makes the
     # problem computationally stiff, which brings the default RK3
     # integrator to its knees.
-    timestep = 0.0001
+    timestep = 0.00025
     simulator.reset_integrator(
         RungeKutta2Integrator(diagram, timestep,
                               simulator.get_mutable_context()))

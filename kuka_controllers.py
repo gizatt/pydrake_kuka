@@ -7,6 +7,8 @@ from pydrake.all import (
     LeafSystem,
     PortDataType,
 )
+
+import kuka_ik
 import kuka_utils
 
 
@@ -181,38 +183,78 @@ class ManipStateMachine(LeafSystem):
     ''' Encodes the high-level logic
         for the manipulation system.
 
-        This implementation is fairly minimal.
-        It is supplied with an open-loop
-        trajectory (presumably, to grasp the object from a
-        known position). At runtime, it spools
-        out pose goals for the robot according to
-        this trajectory. Once the trajectory has been
-        executed, it closes the gripper, waits
-        a second, and then plays the trajectory back in reverse
-        to bring the robot back to its original posture.
+        It pulls the robotic to a nominal pose, and then
+        (given as input a list of all of the cut cylinder
+        poses) repeatedly tries to plan collision-free
+        trajectories to a pose goal relative to a flippable
+        edge.
+
+        States:
+           - Returning to nominal
+           - Executing flip
+
+        A flip plan is an open-loop joint trajectory that
+        get the end effector to the object (stage 1), moves
+        inwards towards the object until contact is made
+        (stage 2), and then does an open-loop flip maneuver
+        (stage 3).
+
+        TODO in future: better control with contact:
+        A "flip" plan comes with a couple of parts:
+            - A joint trajectory to get the end effect
+             close to the target point on the surface
+            - The actual target point on the surface
+              of both the gripper and the object, which
+              we want to bring into contact
+            - A pose trajectory of the object we want
+              to achieve, along with a trajectory of
+              the gripper
+
     '''
-    def __init__(self, rbt, plant, qtraj):
+
+    STATE_LOST = -1
+    STATE_MOVING_TO_NOMINAL = 0
+    STATE_ATTEMPTING_FLIP = 1
+    STATE_STUCK = 2
+
+    def __init__(self, rbt_full, rbt_kuka, q_nom,
+                 world_builder, hand_controller, kuka_controller):
         LeafSystem.__init__(self)
-        self.set_name("Manipulation State Machine")
+        self.set_name("Food Flipping State Machine")
 
-        self.qtraj = qtraj
+        self.end_of_plan_time_margin = 0.1
+        self.n_replan_attempts_nominal = 10
+        self.n_replan_attempts_flip = 10
 
-        self.rbt = rbt
-        self.nq = rbt.get_num_positions()
-        self.plant = plant
+        self.q_nom = q_nom
+        # TODO(gizatt) Move these into state vector?
+        self.q_traj = None
+        self.q_traj_d = None
+        self.rbt_full = rbt_full
+        self.rbt_kuka = rbt_kuka
+        self.nq_full = rbt_full.get_num_positions()
+        self.nq_kuka = rbt_kuka.get_num_positions()
+        self.world_builder = world_builder
+        self.hand_controller = hand_controller
+        self.kuka_controller = kuka_controller
 
         self.robot_state_input_port = \
             self._DeclareInputPort(PortDataType.kVectorValued,
-                                   rbt.get_num_positions() +
-                                   rbt.get_num_velocities())
+                                   rbt_full.get_num_positions() +
+                                   rbt_full.get_num_velocities())
 
         self._DeclareDiscreteState(1)
-        self._DeclarePeriodicDiscreteUpdate(period_sec=0.001)
+        self._DeclarePeriodicDiscreteUpdate(period_sec=0.01)
+        # TODO set default state somehow better. Requires new
+        # bindings to override AllocateDiscreteState or something else.
+        self.initialized = False
 
+        # TODO The controller takes full state in, even though it only
+        # controls the Kuka... that should be tidied up.
         self.kuka_setpoint_output_port = \
             self._DeclareVectorOutputPort(
-                BasicVector(rbt.get_num_positions() +
-                            rbt.get_num_velocities()),
+                BasicVector(rbt_full.get_num_positions() +
+                            rbt_full.get_num_velocities()),
                 self._DoCalcKukaSetpointOutput)
         self.hand_setpoint_output_port = \
             self._DeclareVectorOutputPort(BasicVector(1),
@@ -220,45 +262,118 @@ class ManipStateMachine(LeafSystem):
 
         self._DeclarePeriodicPublish(0.01, 0.0)
 
+    def _PlanToNominal(self, q0, start_time):
+        print "Searching for trajectory to get to nominal pose."
+        success = False
+        for k in range(self.n_replan_attempts_nominal):
+            qtraj, info = kuka_ik.plan_trajectory_to_posture(
+                self.rbt_full, q0, self.q_nom, 10, 1., start_time)
+            if info not in [1, 3, 100]:
+                print "Got error code, trying again."
+                continue
+
+            if kuka_utils.is_trajectory_collision_free(self.rbt_full, qtraj):
+                success = True
+                break
+            else:
+                print "Got a good error code, but trajectory was not " \
+                      "collision-free. Trying again."
+        if success:
+            self.q_traj = qtraj
+            self.q_traj_d = qtraj.derivative(1)
+        return success
+
+    def _PlanFlip(self, q0, start_time):
+        # Pick an object
+        print "Searching for trajectory to get to random pose."
+        success = False
+        for k in range(self.n_replan_attempts_flip):
+            qtraj, info = kuka_ik.plan_trajectory_to_posture(
+                self.rbt_full, q0,
+                q0[:self.nq_kuka] + (np.random.random(self.nq_kuka)-0.5)*0.5,
+                10, 1., start_time)
+            if info not in [1, 3, 100]:
+                print "Got error code, trying again."
+                continue
+
+            if kuka_utils.is_trajectory_collision_free(self.rbt_full, qtraj):
+                success = True
+                break
+            else:
+                print "Got a good error code, but trajectory was not " \
+                      "collision-free. Trying again."
+        if success:
+            self.q_traj = qtraj
+            self.q_traj_d = qtraj.derivative(1)
+        return success
+
     def _DoCalcDiscreteVariableUpdates(self, context, events, discrete_state):
         # Call base method to ensure we do not get recursion.
         LeafSystem._DoCalcDiscreteVariableUpdates(
             self, context, events, discrete_state)
 
-        new_state = discrete_state. \
+        state = discrete_state. \
             get_mutable_vector().get_mutable_value()
-        # Close gripper after plan has been executed
-        if context.get_time() > self.qtraj.end_time():
-            new_state[:] = 0.
-        else:
-            new_state[:] = 0.1
-
-    def _DoCalcKukaSetpointOutput(self, context, y_data):
+        if not self.initialized:
+            state[0] = self.STATE_LOST
+            self.initialized = True
 
         t = context.get_time()
-
-        t_end = self.qtraj.end_time()
-        if t < t_end:
-            virtual_time = t
+        x_robot_full = self.EvalVectorInput(
+            context, self.robot_state_input_port.get_index()).get_value()
+        q_robot_full = x_robot_full[0:self.nq_full]
+        if self.q_traj:
+            terminated = \
+                t >= self.q_traj.end_time() + self.end_of_plan_time_margin
         else:
-            virtual_time = t_end - (t - t_end)
+            terminated = True
 
-        dt = 0.01  # Look-ahead for estimating target velocity
+        if state[0] == self.STATE_LOST or \
+           (state[0] == self.STATE_ATTEMPTING_FLIP and terminated):
+            if self._PlanToNominal(q_robot_full, t):
+                state[0] = self.STATE_MOVING_TO_NOMINAL
+                print "State machine moving to nominal"
+            else:
+                state[0] = self.STATE_STUCK
+                self.q_traj = None
+                self.q_traj_d = None
+                print "State machine stuck"
+        elif state[0] == self.STATE_MOVING_TO_NOMINAL and terminated:
+            if self._PlanFlip(q_robot_full, t):
+                state[0] = self.STATE_ATTEMPTING_FLIP
+                print "State machine attempting flip"
+            else:
+                state[0] = self.STATE_STUCK
+                self.q_traj_d = None
+                print "State machine stuck"
 
-        target_q = self.qtraj.value(virtual_time)
-        target_qn = self.qtraj.value(virtual_time+dt)
-        # This is pretty inefficient and inaccurate -- TODO(gizatt)
-        # velocity target directly from the trajectory object somehow.
-        target_v = (target_qn - target_q) / dt
-        if t >= t_end:
-            target_v *= -1.
+    def _DoCalcKukaSetpointOutput(self, context, y_data):
+        t = context.get_time()
+        if self.q_traj:
+            target_q = self.q_traj.value(t)[
+                self.kuka_controller.controlled_inds, 0]
+            target_v = self.q_traj_d.value(t)[
+                self.kuka_controller.controlled_inds, 0]
+            if t >= self.q_traj.end_time():
+                target_v *= 0.
+        else:
+            x = self.EvalVectorInput(
+                context, self.robot_state_input_port.get_index()).get_value()
+            target_q = x[0:self.nq_kuka]
+            target_v = target_q*0.
+
         kuka_setpoint = y_data.get_mutable_value()
         nq_plan = target_q.shape[0]
-        kuka_setpoint[:nq_plan] = target_q[:, 0]
-        kuka_setpoint[self.nq:(self.nq+nq_plan)] = target_v[:, 0]
+        kuka_setpoint[:nq_plan] = target_q[:]
+        kuka_setpoint[self.nq_full:(self.nq_full+nq_plan)] = target_v[:]
 
     def _DoCalcHandSetpointOutput(self, context, y_data):
         state = context.get_discrete_state_vector().get_value()
         y = y_data.get_mutable_value()
         # Get the ith finger control output
-        y[:] = state[0]
+        if self.q_traj:
+            q_hand = self.q_traj.value(context.get_time())[
+                self.hand_controller.controlled_inds, 0]
+            y[:] = q_hand[1] - q_hand[0]
+        else:
+            y[:] = 10.

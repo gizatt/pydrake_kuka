@@ -53,156 +53,152 @@ def extract_position_indices(rbt, controlled_joint_names):
     return controlled_config_inds, other_config_inds
 
 
-_table_top_z_in_world = 0.736 + 0.057 / 2
-_manipuland_body_indices = []
+def is_trajectory_collision_free(rbt, qtraj, sample_time=0.1):
+    print "is_trajectory_collision_free not implemented"
+    return True
+    for t in np.linspace(qtraj.start_time(), qtraj.end_time(), sample_time):
+        q = qtraj.value(t)
+        kinsol = rbt.doKinematics(q)
+        pointpairs = rbt.ComputeMaximumDepthCollisionPoints(kinsol)
+        # do something with those
+    return False
 
 
-def setup_kuka(rbt):
-    iiwa_urdf_path = os.path.join(
-        pydrake.getDrakePath(),
-        "manipulation", "models", "iiwa_description", "urdf",
-        "iiwa14_polytope_collision.urdf")
+class ExperimentWorldBuilder():
+    def __init__(self):
+        self.table_top_z_in_world = 0.736 + 0.057 / 2
+        self.manipuland_body_indices = []
 
-    wsg50_sdf_path = os.path.join(
-        pydrake.getDrakePath(),
-        "manipulation", "models", "wsg_50_description", "sdf",
-        "schunk_wsg_50.sdf")
+    def setup_kuka(self, rbt):
+        iiwa_urdf_path = os.path.join(
+            pydrake.getDrakePath(),
+            "manipulation", "models", "iiwa_description", "urdf",
+            "iiwa14_polytope_collision.urdf")
 
-    table_sdf_path = os.path.join(
-        pydrake.getDrakePath(),
-        "examples", "kuka_iiwa_arm", "models", "table",
-        "extra_heavy_duty_table_surface_only_collision.sdf")
+        wsg50_sdf_path = os.path.join(
+            pydrake.getDrakePath(),
+            "manipulation", "models", "wsg_50_description", "sdf",
+            "schunk_wsg_50.sdf")
 
-    AddFlatTerrainToWorld(rbt)
-    table_frame_robot = RigidBodyFrame(
-        "table_frame_robot", rbt.world(),
-        [0.0, 0, 0], [0, 0, 0])
-    AddModelInstancesFromSdfString(
-        open(table_sdf_path).read(), FloatingBaseType.kFixed,
-        table_frame_robot, rbt)
-    table_frame_fwd = RigidBodyFrame(
-        "table_frame_fwd", rbt.world(),
-        [0.8, 0, 0], [0, 0, 0])
-    AddModelInstancesFromSdfString(
-        open(table_sdf_path).read(), FloatingBaseType.kFixed,
-        table_frame_fwd, rbt)
+        table_sdf_path = os.path.join(
+            pydrake.getDrakePath(),
+            "examples", "kuka_iiwa_arm", "models", "table",
+            "extra_heavy_duty_table_surface_only_collision.sdf")
 
-    robot_base_frame = RigidBodyFrame(
-        "robot_base_frame", rbt.world(),
-        [0.0, 0, _table_top_z_in_world], [0, 0, 0])
-    AddModelInstanceFromUrdfFile(iiwa_urdf_path, FloatingBaseType.kFixed,
-                                 robot_base_frame, rbt)
+        AddFlatTerrainToWorld(rbt)
+        table_frame_robot = RigidBodyFrame(
+            "table_frame_robot", rbt.world(),
+            [0.0, 0, 0], [0, 0, 0])
+        AddModelInstancesFromSdfString(
+            open(table_sdf_path).read(), FloatingBaseType.kFixed,
+            table_frame_robot, rbt)
+        table_frame_fwd = RigidBodyFrame(
+            "table_frame_fwd", rbt.world(),
+            [0.8, 0, 0], [0, 0, 0])
+        AddModelInstancesFromSdfString(
+            open(table_sdf_path).read(), FloatingBaseType.kFixed,
+            table_frame_fwd, rbt)
 
-    # Add gripper
-    gripper_frame = rbt.findFrame("iiwa_frame_ee")
-    AddModelInstancesFromSdfString(
-        open(wsg50_sdf_path).read(), FloatingBaseType.kFixed,
-        gripper_frame, rbt)
+        robot_base_frame = RigidBodyFrame(
+            "robot_base_frame", rbt.world(),
+            [0.0, 0, self.table_top_z_in_world], [0, 0, 0])
+        AddModelInstanceFromUrdfFile(iiwa_urdf_path, FloatingBaseType.kFixed,
+                                     robot_base_frame, rbt)
 
+        # Add gripper
+        gripper_frame = rbt.findFrame("iiwa_frame_ee")
+        AddModelInstancesFromSdfString(
+            open(wsg50_sdf_path).read(), FloatingBaseType.kFixed,
+            gripper_frame, rbt)
 
-def add_block_to_tabletop(rbt):
-    object_urdf_path = os.path.join(
-        pydrake.getDrakePath(),
-        "examples", "kuka_iiwa_arm", "models", "objects",
-        "block_for_pick_and_place.urdf")
+    def add_cut_cylinders_to_tabletop(self, rbt, n_objects,
+                                      do_convex_decomp=False):
+        import mesh_creation
+        import trimesh
+        for k in range(n_objects):
+            # Determine parameters of the cylinders
+            height = np.random.random() * 0.03 + 0.04
+            radius = np.random.random() * 0.02 + 0.01
+            cut_dir = np.random.random(3)-0.5
+            cut_dir[2] = 0.
+            cut_dir /= np.linalg.norm(cut_dir)
+            cut_point = (np.random.random(3) - 0.5)*radius*1.5
+            cutting_planes = [(cut_point, cut_dir)]
 
-    object_init_frame = RigidBodyFrame(
-        "object_init_frame", rbt.world(),
-        [0.8, 0, _table_top_z_in_world+0.1], [0, 0, 0])
+            # Create a mesh programmatically for that cylinder
+            cyl = mesh_creation.create_cut_cylinder(
+                radius, height, cutting_planes, sections=20)
+            cyl.density = 1000.  # Same as water
+            init_pos = [0.6 + np.random.random()*0.2,
+                        -0.2 + np.random.random()*0.4,
+                        self.table_top_z_in_world+radius+0.001]
+            init_rot = [0., np.pi/2., np.random.random() * np.pi * 2.]
 
-    AddModelInstanceFromUrdfFile(object_urdf_path,
-                                 FloatingBaseType.kRollPitchYaw,
-                                 object_init_frame, rbt)
-    _manipuland_body_indices.append(rbt.get_num_bodies()-1)
+            # Save it out to a file and add it to the RBT
+            object_init_frame = RigidBodyFrame(
+                "object_init_frame_%f" % k, rbt.world(),
+                init_pos, init_rot)
 
+            if do_convex_decomp:  # more powerful, does a convex decomp
+                urdf_dir = "/tmp/mesh_%d/" % k
+                trimesh.io.urdf.export_urdf(cyl, urdf_dir)
+                urdf_path = urdf_dir + "mesh_%d.urdf" % k
+                AddModelInstanceFromUrdfFile(urdf_path,
+                                             FloatingBaseType.kRollPitchYaw,
+                                             object_init_frame, rbt)
+                self.manipuland_body_indices.append(rbt.get_num_bodies()-1)
+            else:
+                sdf_dir = "/tmp/mesh_%d/" % k
+                name = "mesh_%d" % k
+                mesh_creation.export_sdf(
+                    cyl, name, sdf_dir, color=[0.75, 0.2, 0.2, 1.])
+                sdf_path = sdf_dir + "mesh_%d.sdf" % k
+                AddModelInstancesFromSdfString(
+                    open(sdf_path).read(), FloatingBaseType.kRollPitchYaw,
+                    object_init_frame, rbt)
+                self.manipuland_body_indices.append(rbt.get_num_bodies()-1)
 
-def add_cut_cylinders_to_tabletop(rbt, n_objects, do_convex_decomp=False):
-    import mesh_creation
-    import trimesh
-    for k in range(n_objects):
-        # Determine parameters of the cylinders
-        height = np.random.random() * 0.03 + 0.04
-        radius = np.random.random() * 0.02 + 0.01
-        cut_dir = np.random.random(3)-0.5
-        cut_dir[2] = 0.
-        cut_dir /= np.linalg.norm(cut_dir)
-        cut_point = (np.random.random(3) - 0.5)*radius*1.5
-        cutting_planes = [(cut_point, cut_dir)]
+    def project_rbt_to_nearest_feasible_on_table(self, rbt, q0):
+        # Project arrangement to nonpenetration with IK
+        constraints = []
 
-        # Create a mesh programmatically for that cylinder
-        cyl = mesh_creation.create_cut_cylinder(
-            radius, height, cutting_planes, sections=20)
-        cyl.density = 1000.  # Same as water
-        init_pos = [0.6 + np.random.random()*0.2,
-                    -0.2 + np.random.random()*0.4,
-                    _table_top_z_in_world+radius+0.001]
-        init_rot = [0., np.pi/2., np.random.random() * np.pi * 2.]
+        constraints.append(ik.MinDistanceConstraint(
+            model=rbt, min_distance=0.01,
+            active_bodies_idx=self.manipuland_body_indices,
+            active_group_names=set()))
 
-        # Save it out to a file and add it to the RBT
-        object_init_frame = RigidBodyFrame(
-            "object_init_frame_%f" % k, rbt.world(),
-            init_pos, init_rot)
+        locked_position_inds = []
+        for body_i in range(rbt.get_num_bodies()):
+            if body_i in self.manipuland_body_indices:
+                constraints.append(ik.WorldPositionConstraint(
+                    model=rbt, body=body_i,
+                    pts=np.array([0., 0., 0.]),
+                    lb=np.array([0.6, -0.2, self.table_top_z_in_world]),
+                    ub=np.array([1.0, 0.2, self.table_top_z_in_world+0.3])))
+            else:
+                body = rbt.get_body(body_i)
+                if body.has_joint():
+                    for k in range(body.get_position_start_index(),
+                                   body.get_position_start_index() +
+                                   body.getJoint().get_num_positions()):
+                        locked_position_inds.append(k)
 
-        if do_convex_decomp:  # more powerful, does a convex decomp
-            urdf_dir = "/tmp/mesh_%d/" % k
-            trimesh.io.urdf.export_urdf(cyl, urdf_dir)
-            urdf_path = urdf_dir + "mesh_%d.urdf" % k
-            AddModelInstanceFromUrdfFile(urdf_path,
-                                         FloatingBaseType.kRollPitchYaw,
-                                         object_init_frame, rbt)
-            _manipuland_body_indices.append(rbt.get_num_bodies()-1)
-        else:
-            sdf_dir = "/tmp/mesh_%d/" % k
-            name = "mesh_%d" % k
-            mesh_creation.export_sdf(
-                cyl, name, sdf_dir, color=[0.75, 0.2, 0.2, 1.])
-            sdf_path = sdf_dir + "mesh_%d.sdf" % k
-            AddModelInstancesFromSdfString(
-                open(sdf_path).read(), FloatingBaseType.kRollPitchYaw,
-                object_init_frame, rbt)
-            _manipuland_body_indices.append(rbt.get_num_bodies()-1)
+        required_posture_constraint = ik.PostureConstraint(rbt)
+        required_posture_constraint.setJointLimits(
+            locked_position_inds, q0[locked_position_inds]-0.001,
+            q0[locked_position_inds]+0.001)
+        constraints.append(required_posture_constraint)
 
+        options = ik.IKoptions(rbt)
+        options.setMajorIterationsLimit(10000)
+        options.setIterationsLimit(100000)
+        results = ik.InverseKin(
+            rbt, q0, q0, constraints, options)
 
-def project_rbt_to_nearest_feasible_on_table(rbt, q0):
-    # Project arrangement to nonpenetration with IK
-    constraints = []
-
-    constraints.append(ik.MinDistanceConstraint(
-        model=rbt, min_distance=0.01, active_bodies_idx=list(),
-        active_group_names=set()))
-
-    locked_position_inds = []
-    for body_i in range(rbt.get_num_bodies()):
-        if body_i in _manipuland_body_indices:
-            constraints.append(ik.WorldPositionConstraint(
-                model=rbt, body=body_i,
-                pts=np.array([0., 0., 0.]),
-                lb=np.array([0.6, -0.2, _table_top_z_in_world]),
-                ub=np.array([1.0, 0.2, _table_top_z_in_world+0.3])))
-        else:
-            body = rbt.get_body(body_i)
-            if body.has_joint():
-                for k in range(body.get_position_start_index(),
-                               body.get_position_start_index() +
-                               body.getJoint().get_num_positions()):
-                    locked_position_inds.append(k)
-
-    required_posture_constraint = ik.PostureConstraint(rbt)
-    required_posture_constraint.setJointLimits(
-        locked_position_inds, q0[locked_position_inds]-0.001,
-        q0[locked_position_inds]+0.001)
-    constraints.append(required_posture_constraint)
-
-    options = ik.IKoptions(rbt)
-    options.setMajorIterationsLimit(10000)
-    options.setIterationsLimit(100000)
-    results = ik.InverseKin(
-        rbt, q0, q0, constraints, options)
-
-    qf = results.q_sol[0]
-    info = results.info[0]
-    print "Projected to feasibility with info %d" % info
-    return qf
+        qf = results.q_sol[0]
+        info = results.info[0]
+        print "Projected to feasibility with info %d" % info
+        return qf
 
 
 def render_system_with_graphviz(system, output_file="system_view.gz"):
