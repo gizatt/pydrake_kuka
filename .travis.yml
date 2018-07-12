@@ -1,0 +1,25 @@
+language: python
+python:
+  - 2.7
+
+sudo: false
+
+os:
+  - linux
+
+
+services:
+  - docker
+
+env:
+  global:
+  - CONDA_DEPS="pytest numpy trimesh pyglet"
+  - PYTHONPATH="$HOME/underactuated:/opt/drake/lib/python2.7/site-packages"
+  matrix:
+  - DRAKE_URL="https://drake-packages.csail.mit.edu/drake/nightly/drake-latest-xenial.tar.gz"
+
+install:
+  - docker build -t test --build-arg DRAKE_URL=$DRAKE_URL .
+
+script:
+  - docker run --name test test
