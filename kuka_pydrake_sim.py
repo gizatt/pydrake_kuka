@@ -59,7 +59,7 @@ if __name__ == "__main__":
     world_builder = kuka_utils.ExperimentWorldBuilder()
     world_builder.setup_kuka(rbt)
     rbt_just_kuka = rbt.Clone()
-    world_builder.add_cut_cylinders_to_tabletop(rbt, 10)
+    world_builder.add_cut_cylinders_to_tabletop(rbt, 5)
     rbt.compile()
     rbt_just_kuka.compile()
     q0 = rbt.getZeroConfiguration()
@@ -188,7 +188,7 @@ if __name__ == "__main__":
     # advancing once the gripper grasps the box.  Grasping makes the
     # problem computationally stiff, which brings the default RK3
     # integrator to its knees.
-    timestep = 0.00025
+    timestep = 0.0001
     simulator.reset_integrator(
         RungeKutta2Integrator(diagram, timestep,
                               simulator.get_mutable_context()))

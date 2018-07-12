@@ -8,7 +8,7 @@ Xvfb :100 -ac -screen 0 800x600x24 &
 sleep 1
 
 # Launch a complete robot context and execute some canned movement.
-DISPLAY=:100 python kuka_pydrake_sim.py --test
+DISPLAY=:100 python kuka_pydrake_sim.py --test -T 5.
 exit_status=$?
 if [ ! $exit_status -eq 0 ]; then
   echo "Error code in kuka_pydrake_sim.py: " $exit_status

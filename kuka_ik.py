@@ -118,6 +118,8 @@ def plan_trajectory_to_posture(rbt, q0, qf, n_knots, duration,
     constraints.append(posture_constraint)
 
     # Constrain all joints to be the initial posture at the start time
+    # TODO: actually freeze these, rather than letting them be searched over.
+    # No point actually searching over these, and makes IK way slower
     start_tspan = np.array([0., 0.])
     posture_constraint = ik.PostureConstraint(rbt, start_tspan)
     posture_constraint.setJointLimits(
