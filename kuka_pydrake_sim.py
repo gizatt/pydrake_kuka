@@ -3,6 +3,7 @@
 import argparse
 import random
 import time
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,12 +39,27 @@ if __name__ == "__main__":
                         action="store_true",
                         help="Help out CI by launching a meshcat server for "
                              "the duration of the test.")
+    parser.add_argument("-N", "--n_objects",
+                        type=int, default=10,
+                        help="# of objects to spawn")
     parser.add_argument("--seed",
                         type=float, default=time.time(),
                         help="RNG seed")
+    parser.add_argument("--hacky_save_video",
+                        action="store_true",
+                        help="Saves a video, but does it by screen recording \
+                              the area where I usually keep meshcat open.")
+    parser.add_argument("--show_plots",
+                        action="store_true",
+                        help="Shows traces of desired vs achieved trajectories.")
+    parser.add_argument("--animate_forever",
+                        action="store_true",
+                        help="Animates the completed sim in meshcat repeatedly.")
+
     args = parser.parse_args()
-    random.seed(args.seed)
-    np.random.seed(int(args.seed*1000. % 2**32))
+    int_seed = int(args.seed*1000. % 2**32)
+    random.seed(int_seed)
+    np.random.seed(int_seed)
 
     meshcat_server_p = None
     if args.test:
@@ -59,17 +75,18 @@ if __name__ == "__main__":
     world_builder = kuka_utils.ExperimentWorldBuilder()
     world_builder.setup_kuka(rbt)
     rbt_just_kuka = rbt.Clone()
-    world_builder.add_cut_cylinders_to_tabletop(rbt, 5)
+    world_builder.add_cut_cylinders_to_tabletop(rbt, args.n_objects)
     rbt.compile()
     rbt_just_kuka.compile()
     q0 = rbt.getZeroConfiguration()
     # "Center low" from IIWA stored_poses.json from Spartan
-    q0[0:7] = [-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38]
+    # + closed hand
+    q0[0:9] = [-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38, 0., 0.0]
     q0 = world_builder.project_rbt_to_nearest_feasible_on_table(
         rbt, q0)
 
     # Set up a visualizer for the robot
-    pbrv = MeshcatRigidBodyVisualizer(rbt, draw_timestep=0.01)
+    mrbv = MeshcatRigidBodyVisualizer(rbt, draw_timestep=0.01)
     # (wait while the visualizer warms up and loads in the models)
     time.sleep(2.0)
 
@@ -109,10 +126,11 @@ if __name__ == "__main__":
     # motion...
     manip_state_machine = builder.AddSystem(
         kuka_controllers.ManipStateMachine(
-            rbt, rbt_just_kuka, q0[0:9],
+            rbt, rbt_just_kuka, q0[0:7],
             world_builder=world_builder,
             hand_controller=hand_controller,
-            kuka_controller=kuka_controller))
+            kuka_controller=kuka_controller,
+            mrbv = mrbv))
     builder.Connect(rbplant_sys.state_output_port(),
                     manip_state_machine.robot_state_input_port)
     builder.Connect(manip_state_machine.hand_setpoint_output_port,
@@ -121,7 +139,7 @@ if __name__ == "__main__":
                     kuka_controller.setpoint_input_port)
 
     # Hook up the visualizer we created earlier.
-    visualizer = builder.AddSystem(pbrv)
+    visualizer = builder.AddSystem(mrbv)
     builder.Connect(rbplant_sys.state_output_port(),
                     visualizer.get_input_port(0))
 
@@ -195,10 +213,29 @@ if __name__ == "__main__":
 
     # This kicks off simulation. Most of the run time will be spent
     # in this call.
-    simulator.StepTo(args.duration)
+    try:
+        simulator.StepTo(args.duration)
+    except StopIteration:
+        print "Terminated early"
     print("Final state: ", state.CopyToVector())
+    end_time = simulator.get_mutable_context().get_time()
 
-    if args.test is not True:
+    if args.animate_forever:
+        try:
+            while(1):
+                mrbv.animate(state_log)
+        except Exception as e:
+            print "Fail ", e
+    elif args.hacky_save_video:
+        filename = "seed_%d.ogg" % int_seed
+        import subprocess
+        p = subprocess.Popen(
+            ("byzanz-record -x 3833 -y 703 -w 1616 -h 977 "
+             "%s --delay=0 -d %d -v" % (filename, end_time+1)).split(" "))
+        mrbv.animate(state_log)
+        p.wait()
+
+    if args.show_plots:
         # Do some plotting to show off accessing signal logger data.
         nq = rbt.get_num_positions()
         plt.figure()

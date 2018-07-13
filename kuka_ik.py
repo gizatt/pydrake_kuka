@@ -10,12 +10,13 @@ from pydrake.solvers import ik
 import kuka_utils
 
 
-def plan_ee_configuration(rbt, q0, qseed, target_ee_pose):
+def plan_ee_configuration(rbt, q0, qseed, ee_pose, 
+    ee_body, ee_point, allow_collision=True,
+    active_bodies_idx=list()):
     ''' Performs IK for a single point in time
         to get the Kuka's gripper to a specified
         pose in space. '''
     nq = rbt.get_num_positions()
-    q_des_full = np.zeros(nq)
 
     controlled_joint_names = [
         "iiwa_joint_1",
@@ -32,35 +33,35 @@ def plan_ee_configuration(rbt, q0, qseed, target_ee_pose):
     # Assemble IK constraints
     constraints = []
 
-    constraints.append(ik.MinDistanceConstraint(
-        model=rbt, min_distance=0.01, active_bodies_idx=list(),
-        active_group_names=set()))
+    if not allow_collision:
+        constraints.append(ik.MinDistanceConstraint(
+            model=rbt, min_distance=1E-6, active_bodies_idx=active_bodies_idx,
+            active_group_names=set()))
 
     # Constrain the non-searched-over joints
     posture_constraint = ik.PostureConstraint(rbt)
     posture_constraint.setJointLimits(
         constrained_config_inds,
-        q0[constrained_config_inds]-0.01, q0[constrained_config_inds]+0.01)
+        q0[constrained_config_inds]-0.001, q0[constrained_config_inds]+0.001)
     constraints.append(posture_constraint)
 
     # Constrain the ee frame to lie on the target point
     # facing in the target orientation
-    ee_frame = rbt.findFrame("iiwa_frame_ee").get_frame_index()
     constraints.append(
         ik.WorldPositionConstraint(
-            rbt, ee_frame, np.zeros((3, 1)),
-            target_ee_pose[0:3]-0.01, target_ee_pose[0:3]+0.01)
+            rbt, ee_body, ee_point,
+            ee_pose[0:3]-0.01, ee_pose[0:3]+0.01)
     )
     constraints.append(
         ik.WorldEulerConstraint(
-            rbt, ee_frame,
-            target_ee_pose[3:6]-0.01, target_ee_pose[3:6]+0.01)
+            rbt, ee_body,
+            ee_pose[3:6]-0.3, ee_pose[3:6]+0.3)
     )
 
     options = ik.IKoptions(rbt)
     results = ik.InverseKin(
-        rbt, q0, q0, constraints, options)
-    print results.q_sol, "info %d" % results.info[0]
+        rbt, q0, qseed, constraints, options)
+    #print "plan ee config info %d" % results.info[0]
     return results.q_sol[0], results.info[0]
 
 
@@ -79,7 +80,6 @@ def plan_trajectory_to_posture(rbt, q0, qf, n_knots, duration,
     for this function uses "inverseKinTrajSimple" -- i.e., it doesn't
     return derivatives. '''
     nq = rbt.get_num_positions()
-    q_des_full = np.zeros(nq)
 
     # Create knot points
     ts = np.linspace(0., duration, n_knots)
@@ -91,9 +91,7 @@ def plan_trajectory_to_posture(rbt, q0, qf, n_knots, duration,
         "iiwa_joint_4",
         "iiwa_joint_5",
         "iiwa_joint_6",
-        "iiwa_joint_7",
-        "left_finger_sliding_joint",
-        "right_finger_sliding_joint"
+        "iiwa_joint_7"
         ]
     free_config_inds, constrained_config_inds = \
         kuka_utils.extract_position_indices(rbt, controlled_joint_names)
@@ -157,32 +155,23 @@ def plan_trajectory_to_posture(rbt, q0, qf, n_knots, duration,
     qtraj = PiecewisePolynomial.Pchip(ts, np.vstack(results.q_sol).T, True)
 
     print "IK returned a solution with info %d" % results.info[0]
-    print "(Info 1 is good, other values are dangerous)"
     return qtraj, results.info[0]
 
 
-def plan_ee_trajectory(rbt, q0, target_reach_pose,
-                       target_grasp_pose, n_knots,
-                       reach_time, grasp_time):
-    ''' Solves IK at a series of sample times (connected with a
-    cubic spline) to generate a trajectory to bring the Kuka from an
-    initial pose q0 to a final end effector pose in the specified
-    time, using the specified number of knot points.
-
-    Uses an intermediate pose reach_pose as an intermediate target
-    to hit at the knot point closest to reach_time.
-
-    See http://drake.mit.edu/doxygen_cxx/rigid__body__ik_8h.html
-    for the "inverseKinTraj" entry. At the moment, the Python binding
-    for this function uses "inverseKinTrajSimple" -- i.e., it doesn't
-    return derivatives. '''
+def plan_ee_trajectory(rbt, q0, traj_seed, ee_times, ee_poses,
+                       ee_body, ee_point, n_knots, start_time = 0.,
+                       avoid_collision_tspans = [],
+                       active_bodies_idx = list()):
     nq = rbt.get_num_positions()
-    q_des_full = np.zeros(nq)
 
     # Create knot points
-    ts = np.linspace(0., grasp_time, n_knots)
-    # Figure out the knot just before reach time
-    reach_start_index = np.argmax(ts >= reach_time) - 1
+    ts = np.linspace(0., ee_times[-1], n_knots)
+
+    # Insert one more for each ee time if not already in there
+    for t in ee_times:
+        if t not in ts:
+            ts = np.insert(ts, np.argmax(ts >= t), t)
+    print "times ", ts, " for times ", ee_times
 
     controlled_joint_names = [
         "iiwa_joint_1",
@@ -199,12 +188,21 @@ def plan_ee_trajectory(rbt, q0, target_reach_pose,
     # Assemble IK constraints
     constraints = []
 
+    for tspan in avoid_collision_tspans:
+        constraints.append(ik.MinDistanceConstraint(
+            model=rbt, min_distance=1E-6, active_bodies_idx=active_bodies_idx,
+            active_group_names=set(), tspan=tspan))
+        print "active for ", tspan
+
+    # Make starting constraint sensible if it's out of joint limits
+    q0 = np.clip(q0, rbt.joint_limit_min, rbt.joint_limit_max)
+
     # Constrain the non-searched-over joints for all time
-    all_tspan = np.array([0., grasp_time])
+    all_tspan = np.array([0., ts[-1]])
     posture_constraint = ik.PostureConstraint(rbt, all_tspan)
     posture_constraint.setJointLimits(
         constrained_config_inds,
-        q0[constrained_config_inds]-0.01, q0[constrained_config_inds]+0.01)
+        q0[constrained_config_inds]-0.05, q0[constrained_config_inds]+0.05)
     constraints.append(posture_constraint)
 
     # Constrain all joints to be the initial posture at the start time
@@ -217,39 +215,40 @@ def plan_ee_trajectory(rbt, q0, target_reach_pose,
 
     # Constrain the ee frame to lie on the target point
     # facing in the target orientation in between the
-    # reach and final times
-    ee_frame = rbt.findFrame("iiwa_frame_ee").get_frame_index()
-    for i in range(reach_start_index, n_knots):
-        this_tspan = np.array([ts[i], ts[i]])
-        interp = float(i - reach_start_index) / (n_knots - reach_start_index)
-        target_pose = (1.-interp)*target_reach_pose + interp*target_grasp_pose
+    # reach and final times)
+    for t, pose in zip(ee_times, ee_poses):
+        this_tspan = np.array([t-0.01, t+0.01])
         constraints.append(
             ik.WorldPositionConstraint(
-                rbt, ee_frame, np.zeros((3, 1)),
-                target_pose[0:3]-0.01, target_pose[0:3]+0.01,
+                rbt, ee_body, ee_point,
+                pose[0:3]-0.01, pose[0:3]+0.01,
                 tspan=this_tspan)
         )
         constraints.append(
             ik.WorldEulerConstraint(
-                rbt, ee_frame,
-                target_pose[3:6]-0.05, target_pose[3:6]+0.05,
+                rbt, ee_body,
+                pose[3:6]-0.05, pose[3:6]+0.05,
                 tspan=this_tspan)
         )
 
     # Seed and nom are both the initial repeated for the #
     # of knot points
-    q_seed = np.tile(q0, [1, n_knots])
-    q_nom = np.tile(q0, [1, n_knots])
+    q_seed = np.hstack([traj_seed.value(t) for t in ts])
+    q_nom = np.tile(q0, [ts.shape[0], 1]).T
     options = ik.IKoptions(rbt)
     # Set bounds on initial and final velocities
     zero_velocity = np.zeros(rbt.get_num_velocities())
     options.setqd0(zero_velocity, zero_velocity)
     options.setqdf(zero_velocity, zero_velocity)
-    results = ik.InverseKinTraj(rbt, ts, q_seed, q_nom,
+    Q = np.eye(q0.shape[0], q0.shape[0])
+    Q[free_config_inds[-2:], free_config_inds[-2:]] *= 1
+    options.setQ(Q)
+    options.setQv(np.eye(q0.shape[0], q0.shape[0]) * 10)
+
+    results = ik.InverseKinTraj(rbt, ts, q_nom, q_seed,
                                 constraints, options)
 
-    qtraj = PiecewisePolynomial.Pchip(ts, np.vstack(results.q_sol).T, True)
+    qtraj = PiecewisePolynomial.Pchip(ts + start_time, np.vstack(results.q_sol).T, True)
 
     print "IK returned a solution with info %d" % results.info[0]
-    print "(Info 1 is good, other values are dangerous)"
-    return qtraj, results.info[0]
+    return qtraj, results.info[0], results.q_sol

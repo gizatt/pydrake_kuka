@@ -3,6 +3,7 @@
 import os.path
 from matplotlib import cm
 import numpy as np
+import time
 
 import pydrake
 from pydrake.all import (
@@ -56,7 +57,7 @@ def extract_position_indices(rbt, controlled_joint_names):
 def is_trajectory_collision_free(rbt, qtraj, sample_time=0.1):
     print "is_trajectory_collision_free not implemented"
     return True
-    for t in np.linspace(qtraj.start_time(), qtraj.end_time(), sample_time):
+    for t in np.arange(qtraj.start_time(), qtraj.end_time(), sample_time):
         q = qtraj.value(t)
         kinsol = rbt.doKinematics(q)
         pointpairs = rbt.ComputeMaximumDepthCollisionPoints(kinsol)
@@ -64,10 +65,17 @@ def is_trajectory_collision_free(rbt, qtraj, sample_time=0.1):
     return False
 
 
+def visualize_plan_with_meshcat(rbt, pbrv, qtraj, sample_time=0.05):
+    for t in np.arange(qtraj.start_time(), qtraj.end_time(), sample_time):
+        q = qtraj.value(t)[:]
+        pbrv.draw(q)
+        time.sleep(sample_time)
+
 class ExperimentWorldBuilder():
     def __init__(self):
         self.table_top_z_in_world = 0.736 + 0.057 / 2
         self.manipuland_body_indices = []
+        self.tabletop_indices = []
 
     def setup_kuka(self, rbt):
         iiwa_urdf_path = os.path.join(
@@ -92,12 +100,14 @@ class ExperimentWorldBuilder():
         AddModelInstancesFromSdfString(
             open(table_sdf_path).read(), FloatingBaseType.kFixed,
             table_frame_robot, rbt)
+        self.tabletop_indices.append(rbt.get_num_bodies()-1)
         table_frame_fwd = RigidBodyFrame(
             "table_frame_fwd", rbt.world(),
-            [0.8, 0, 0], [0, 0, 0])
+            [0.7, 0, 0], [0, 0, 0])
         AddModelInstancesFromSdfString(
             open(table_sdf_path).read(), FloatingBaseType.kFixed,
             table_frame_fwd, rbt)
+        self.tabletop_indices.append(rbt.get_num_bodies()-1)
 
         robot_base_frame = RigidBodyFrame(
             "robot_base_frame", rbt.world(),
@@ -119,20 +129,23 @@ class ExperimentWorldBuilder():
             # Determine parameters of the cylinders
             height = np.random.random() * 0.03 + 0.04
             radius = np.random.random() * 0.02 + 0.01
-            cut_dir = np.random.random(3)-0.5
-            cut_dir[2] = 0.
-            cut_dir /= np.linalg.norm(cut_dir)
-            cut_point = (np.random.random(3) - 0.5)*radius*1.5
+            cut_dir = np.array([1., 0., 0.])
+            cut_point = np.array([(np.random.random() - 0.5)*radius*1.,
+                                  0, 0])
             cutting_planes = [(cut_point, cut_dir)]
 
             # Create a mesh programmatically for that cylinder
             cyl = mesh_creation.create_cut_cylinder(
                 radius, height, cutting_planes, sections=20)
             cyl.density = 1000.  # Same as water
-            init_pos = [0.6 + np.random.random()*0.2,
+            init_pos = [0.4 + np.random.random()*0.2,
                         -0.2 + np.random.random()*0.4,
                         self.table_top_z_in_world+radius+0.001]
-            init_rot = [0., np.pi/2., np.random.random() * np.pi * 2.]
+            init_rot = np.random.random(3) * np.pi * 2.
+            #init_rot[0] = np.pi/2.
+            #init_rot[1] = 0.
+            #init_rot[2] = 0.
+            #init_pos[0:2] = [0.5, 0]
 
             # Save it out to a file and add it to the RBT
             object_init_frame = RigidBodyFrame(
@@ -151,7 +164,7 @@ class ExperimentWorldBuilder():
                 sdf_dir = "/tmp/mesh_%d/" % k
                 name = "mesh_%d" % k
                 mesh_creation.export_sdf(
-                    cyl, name, sdf_dir, color=[0.75, 0.2, 0.2, 1.])
+                    cyl, name, sdf_dir, color=[0.75, 0.5, 0.2, 1.])
                 sdf_path = sdf_dir + "mesh_%d.sdf" % k
                 AddModelInstancesFromSdfString(
                     open(sdf_path).read(), FloatingBaseType.kRollPitchYaw,
@@ -163,8 +176,8 @@ class ExperimentWorldBuilder():
         constraints = []
 
         constraints.append(ik.MinDistanceConstraint(
-            model=rbt, min_distance=0.01,
-            active_bodies_idx=self.manipuland_body_indices,
+            model=rbt, min_distance=1E-3,
+            active_bodies_idx=self.manipuland_body_indices + self.tabletop_indices,
             active_group_names=set()))
 
         locked_position_inds = []
@@ -173,8 +186,8 @@ class ExperimentWorldBuilder():
                 constraints.append(ik.WorldPositionConstraint(
                     model=rbt, body=body_i,
                     pts=np.array([0., 0., 0.]),
-                    lb=np.array([0.6, -0.2, self.table_top_z_in_world]),
-                    ub=np.array([1.0, 0.2, self.table_top_z_in_world+0.3])))
+                    lb=np.array([0.4, -0.2, self.table_top_z_in_world]),
+                    ub=np.array([0.6, 0.2, self.table_top_z_in_world+0.3])))
             else:
                 body = rbt.get_body(body_i)
                 if body.has_joint():

@@ -1,15 +1,21 @@
 # -*- coding: utf8 -*-
-
+import math
 import numpy as np
+import random
+import time
+
 import pydrake
 from pydrake.all import (
     BasicVector,
     LeafSystem,
+    PiecewisePolynomial,
     PortDataType,
 )
 
 import kuka_ik
 import kuka_utils
+
+from underactuated import MeshcatRigidBodyVisualizer
 
 
 class KukaController(LeafSystem):
@@ -218,13 +224,14 @@ class ManipStateMachine(LeafSystem):
     STATE_STUCK = 2
 
     def __init__(self, rbt_full, rbt_kuka, q_nom,
-                 world_builder, hand_controller, kuka_controller):
+                 world_builder, hand_controller, kuka_controller,
+                 mrbv):
         LeafSystem.__init__(self)
         self.set_name("Food Flipping State Machine")
 
         self.end_of_plan_time_margin = 0.1
         self.n_replan_attempts_nominal = 10
-        self.n_replan_attempts_flip = 10
+        self.n_replan_attempts_flip = 100
 
         self.q_nom = q_nom
         # TODO(gizatt) Move these into state vector?
@@ -237,7 +244,8 @@ class ManipStateMachine(LeafSystem):
         self.world_builder = world_builder
         self.hand_controller = hand_controller
         self.kuka_controller = kuka_controller
-
+        self.mrbv = mrbv #MeshcatRigidBodyVisualizer(rbt_kuka, prefix="planviz")
+    
         self.robot_state_input_port = \
             self._DeclareInputPort(PortDataType.kVectorValued,
                                    rbt_full.get_num_positions() +
@@ -267,7 +275,7 @@ class ManipStateMachine(LeafSystem):
         success = False
         for k in range(self.n_replan_attempts_nominal):
             qtraj, info = kuka_ik.plan_trajectory_to_posture(
-                self.rbt_full, q0, self.q_nom, 10, 1., start_time)
+                self.rbt_full, q0, self.q_nom, 10, 0.5, start_time)
             if info not in [1, 3, 100]:
                 print "Got error code, trying again."
                 continue
@@ -285,26 +293,129 @@ class ManipStateMachine(LeafSystem):
 
     def _PlanFlip(self, q0, start_time):
         # Pick an object
-        print "Searching for trajectory to get to random pose."
+        print "Searching for trajectory to pick an object."
         success = False
-        for k in range(self.n_replan_attempts_flip):
-            qtraj, info = kuka_ik.plan_trajectory_to_posture(
-                self.rbt_full, q0,
-                q0[:self.nq_kuka] + (np.random.random(self.nq_kuka)-0.5)*0.5,
-                10, 1., start_time)
+
+        kinsol = self.rbt_full.doKinematics(q0)
+
+        # Build set of flippable objects
+        dirs = np.zeros((3, 4))
+        dirs[:, 0] = [-1., 0., 0.]  # in direction of cut on cylinder
+        dirs[:, 1] = [0., 1., 0.]  # in other non-axial direction of cylinder
+        dirs[:, 2] = [0., 0., 1.]  # in other non-axial direction of cylinder
+        dirs[:, 3] = [0., 0., 0.]  # origin
+        # tuples of (reach pose, touch pose, flip pose)
+        possible_flips = []
+        for body_i in self.world_builder.manipuland_body_indices:
+            # The -x dir in body frame is the cut dir, and it needs
+            # to point up
+            dirs_world = self.rbt_full.transformPoints(kinsol, dirs, body_i, 0)
+            if dirs_world[2, 0] > dirs_world[2, 3] + 0.1:
+                z = self.world_builder.table_top_z_in_world + 0.005
+                dirs_world[2, 3] = z
+                # touch moves along this direction in the world (xy)
+                touch_dir = dirs_world[0:3, 3] - dirs_world[0:3, 1]
+                touch_dir[2] = 0.
+                if np.linalg.norm(touch_dir) == 0.:
+                    touch_dir = dirs_world[0:3, 3] - dirs_world[0:3, 2]
+                    touch_dir[2] = 0.
+                touch_dir /= np.linalg.norm(touch_dir)
+
+                # Try attacking in a couple of directions
+                for t in np.linspace(-0.5, 0.5, 8):
+                    rotation = np.array([[np.cos(t), -np.sin(t)],
+                                         [np.sin(t), np.cos(t)]])
+                    new_touch_dir = np.zeros(3)
+                    new_touch_dir[0:2] = rotation.dot(touch_dir[0:2])
+                    new_touch_dir[2] = touch_dir[2]
+                    touch_yaw = math.atan2(new_touch_dir[1], new_touch_dir[0])
+                    for m in [-1., 1.]:
+                        for k in range(5):
+                            rpy = [-np.pi/2., 0., m*touch_yaw]
+
+                            touch_pose = np.hstack([dirs_world[:, 3], rpy])
+                            reach_pose = np.hstack([dirs_world[:, 3] + new_touch_dir*m*0.1, rpy])
+                            flip_pose = np.hstack([dirs_world[:, 3] - new_touch_dir*m*0.1, rpy])
+                            flip_pose += [0., 0., 0.1, 0., 0., 0.]
+                            possible_flips.append((reach_pose, touch_pose, flip_pose))
+
+        if len(possible_flips) == 0:
+            print "No possible flips! Done!"
+            return False
+        random.shuffle(possible_flips)
+
+        collision_inds = []
+        collision_inds += self.world_builder.manipuland_body_indices
+        collision_inds.append(self.rbt_full.FindBody("right_finger").get_body_index())
+        collision_inds.append(self.rbt_full.FindBody("left_finger").get_body_index())
+        for k in range(self.rbt_full.get_num_bodies()):
+            if self.rbt_full.get_body(k).get_name() == "link":
+                collision_inds.append(k)
+        ee_body=self.rbt_full.FindBody("right_finger").get_body_index()
+        ee_point=[0.0, 0.03, 0.0]  # approximately fingertip
+        for goals in possible_flips:
+            q_reach, info = kuka_ik.plan_ee_configuration(
+                self.rbt_full, q0, q0, ee_pose=goals[0], 
+                ee_body=ee_body, ee_point=ee_point,
+                allow_collision=False,
+                active_bodies_idx=collision_inds)
+            print "reach: ", info
+            self.mrbv.draw(q_reach)
+            time.sleep(0.)
             if info not in [1, 3, 100]:
-                print "Got error code, trying again."
+                continue
+            q_touch, info = kuka_ik.plan_ee_configuration(
+                self.rbt_full, q_reach, q_reach, ee_pose=goals[1], 
+                ee_body=ee_body, ee_point=ee_point,
+                allow_collision=True,
+                active_bodies_idx=collision_inds)
+            print "touch: ", info
+            self.mrbv.draw(q_touch)
+            time.sleep(0.)
+            if info not in [1, 3, 100]:
+                continue
+            q_flip, info = kuka_ik.plan_ee_configuration(
+                self.rbt_full, q_touch, q_reach, ee_pose=goals[2], 
+                ee_body=ee_body, ee_point=ee_point,
+                allow_collision=False,
+                active_bodies_idx=collision_inds)
+            print "flip: ", info
+            self.mrbv.draw(q_flip)
+            time.sleep(0.)
+            if info not in [1, 3, 100]:
                 continue
 
-            if kuka_utils.is_trajectory_collision_free(self.rbt_full, qtraj):
+            # If that checked out, make a real trajectory to hit all of those
+            # points
+            ts = np.array([0., 0.5, 0.75, 1.0])
+            traj_seed = PiecewisePolynomial.Pchip(
+                ts + start_time, np.vstack([q0, q_reach, q_touch, q_flip]).T, True)
+            q_traj = traj_seed
+            #needs more stable ik engine
+            ##kuka_utils.visualize_plan_with_meshcat(self.rbt_kuka, self.mrbv, traj_seed)
+            #q_traj, info, knots = kuka_ik.plan_ee_trajectory(
+            #    self.rbt_full, q0, traj_seed,
+            #    ee_times=ts[1:], ee_poses=goals,
+            #    ee_body=ee_body, ee_point=ee_point,
+            #    n_knots = 20,
+            #    start_time = start_time,
+            #    avoid_collision_tspans=[[ts[0], ts[1]]],
+            #    active_bodies_idx=collision_inds)
+            #for knot in knots:
+            #    self.mrbv.draw(knot)
+            #    time.sleep(0.25)
+            # kuka_utils.visualize_plan_with_meshcat(self.rbt_kuka, self.mrbv, q_traj)
+
+            if kuka_utils.is_trajectory_collision_free(self.rbt_full, q_traj):
                 success = True
                 break
             else:
                 print "Got a good error code, but trajectory was not " \
                       "collision-free. Trying again."
+
         if success:
-            self.q_traj = qtraj
-            self.q_traj_d = qtraj.derivative(1)
+            self.q_traj = q_traj
+            self.q_traj_d = q_traj.derivative(1)
         return success
 
     def _DoCalcDiscreteVariableUpdates(self, context, events, discrete_state):
@@ -344,8 +455,12 @@ class ManipStateMachine(LeafSystem):
                 print "State machine attempting flip"
             else:
                 state[0] = self.STATE_STUCK
+                self.q_traj = None
                 self.q_traj_d = None
                 print "State machine stuck"
+
+	if state[0] == self.STATE_STUCK:
+		raise StopIteration
 
     def _DoCalcKukaSetpointOutput(self, context, y_data):
         t = context.get_time()
@@ -371,9 +486,10 @@ class ManipStateMachine(LeafSystem):
         state = context.get_discrete_state_vector().get_value()
         y = y_data.get_mutable_value()
         # Get the ith finger control output
-        if self.q_traj:
-            q_hand = self.q_traj.value(context.get_time())[
-                self.hand_controller.controlled_inds, 0]
-            y[:] = q_hand[1] - q_hand[0]
-        else:
-            y[:] = 10.
+        #if self.q_traj:
+        #    q_hand = self.q_traj.value(context.get_time())[
+        #        self.hand_controller.controlled_inds, 0]
+        #    y[:] = q_hand[1] - q_hand[0]
+        #else:
+        #    y[:] = 0.
+        y[:] = 0.
