@@ -12,7 +12,7 @@ import kuka_utils
 
 def plan_ee_configuration(rbt, q0, qseed, ee_pose, 
     ee_body, ee_point, allow_collision=True,
-    active_bodies_idx=list()):
+    active_bodies_idx=list(), euler_limits=0.3):
     ''' Performs IK for a single point in time
         to get the Kuka's gripper to a specified
         pose in space. '''
@@ -55,7 +55,7 @@ def plan_ee_configuration(rbt, q0, qseed, ee_pose,
     constraints.append(
         ik.WorldEulerConstraint(
             rbt, ee_body,
-            ee_pose[3:6]-0.3, ee_pose[3:6]+0.3)
+            ee_pose[3:6]-euler_limits, ee_pose[3:6]+euler_limits)
     )
 
     options = ik.IKoptions(rbt)

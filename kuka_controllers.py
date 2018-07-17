@@ -218,7 +218,7 @@ class ManipStateMachine(LeafSystem):
 
     '''
 
-    STATE_LOST = -1
+    STATE_STARTUP = -1
     STATE_MOVING_TO_NOMINAL = 0
     STATE_ATTEMPTING_FLIP = 1
     STATE_STUCK = 2
@@ -426,7 +426,7 @@ class ManipStateMachine(LeafSystem):
         state = discrete_state. \
             get_mutable_vector().get_mutable_value()
         if not self.initialized:
-            state[0] = self.STATE_LOST
+            state[0] = self.STATE_MOVING_TO_NOMINAL
             self.initialized = True
 
         t = context.get_time()
@@ -439,7 +439,7 @@ class ManipStateMachine(LeafSystem):
         else:
             terminated = True
 
-        if state[0] == self.STATE_LOST or \
+        if state[0] == self.STATE_STARTUP or \
            (state[0] == self.STATE_ATTEMPTING_FLIP and terminated):
             if self._PlanToNominal(q_robot_full, t):
                 state[0] = self.STATE_MOVING_TO_NOMINAL
