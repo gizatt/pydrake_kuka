@@ -26,6 +26,7 @@ from underactuated.meshcat_rigid_body_visualizer import (
 
 import kuka_controllers
 import kuka_ik
+import kuka_perception
 import kuka_utils
 
 if __name__ == "__main__":
@@ -136,6 +137,39 @@ if __name__ == "__main__":
     builder.Connect(hand_controller.get_output_port(0),
                     rbplant_sys.get_input_port(1))
 
+    # Add a camera (frames in both robots for convenience)
+    for rbt_instance in [rbt, rbt_just_kuka]:
+        camera_frame = RigidBodyFrame(
+            name="rgbd camera frame",
+            body=rbt_instance.FindBody("body", model_name="Schunk_Gripper"),
+            xyz=[0.0, 0.0, 0.05], rpy=[0, 0.0, np.pi/2.])
+        rbt_instance.addFrame(camera_frame)
+    camera = builder.AddSystem(
+        RgbdCamera(name="camera", tree=rbt,
+                   frame=rbt.findFrame("rgbd camera frame"),
+                   z_near=0.4, z_far=0.8, fov_y=np.pi / 4,
+                   width=100, height=100,
+                   show_window=False))
+    builder.Connect(rbplant_sys.state_output_port(),
+                    camera.get_input_port(0))
+    camera_noise = builder.AddSystem(
+        kuka_perception.DepthImageHeuristicCorruptionBlock(
+            camera, ''))
+
+    builder.Connect(camera.color_image_output_port(),
+                    camera_noise.color_image_input_port)
+    builder.Connect(camera.depth_image_output_port(),
+                    camera_noise.depth_image_input_port)
+
+    '''
+    camera_meshcat_visualizer = builder.AddSystem(
+        kuka_utils.RgbdCameraMeshcatVisualizer(camera, rbt))
+    builder.Connect(camera.depth_image_output_port(),
+                    camera_meshcat_visualizer.camera_input_port)
+    builder.Connect(rbplant_sys.state_output_port(),
+                    camera_meshcat_visualizer.state_input_port)
+    '''
+
     # Create a high-level state machine to guide the robot
     # motion...
     manip_state_machine = builder.AddSystem(
@@ -144,42 +178,21 @@ if __name__ == "__main__":
             world_builder=world_builder,
             hand_controller=hand_controller,
             kuka_controller=kuka_controller,
-            mrbv = mrbv))
+            camera=camera,
+            mrbv=mrbv))
     builder.Connect(rbplant_sys.state_output_port(),
                     manip_state_machine.robot_state_input_port)
     builder.Connect(manip_state_machine.hand_setpoint_output_port,
                     hand_controller.setpoint_input_port)
     builder.Connect(manip_state_machine.kuka_setpoint_output_port,
                     kuka_controller.setpoint_input_port)
+    builder.Connect(camera_noise.depth_image_output_port,
+                    manip_state_machine.depth_image_input_port)
 
     # Hook up the visualizer we created earlier.
     visualizer = builder.AddSystem(mrbv)
     builder.Connect(rbplant_sys.state_output_port(),
                     visualizer.get_input_port(0))
-
-    # Add a camera, too, though no controller or estimator
-    # will consume the output of it.
-    # - Add frame for camera fixture.
-    '''
-    camera_frame = RigidBodyFrame(
-        name="rgbd camera frame", body=rbt.world(),
-        xyz=[2.5, 0., 1.5], rpy=[-np.pi/4, 0., -np.pi])
-    rbt.addFrame(camera_frame)
-    camera = builder.AddSystem(
-        RgbdCamera(name="camera", tree=rbt, frame=camera_frame,
-                   z_near=0.5, z_far=2.0, fov_y=np.pi / 4,
-                   width=320, height=240,
-                   show_window=False))
-    builder.Connect(rbplant_sys.state_output_port(),
-                    camera.get_input_port(0))
-
-    camera_meshcat_visualizer = builder.AddSystem(
-        kuka_utils.RgbdCameraMeshcatVisualizer(camera, rbt))
-    builder.Connect(camera.depth_image_output_port(),
-                    camera_meshcat_visualizer.camera_input_port)
-    builder.Connect(rbplant_sys.state_output_port(),
-                    camera_meshcat_visualizer.state_input_port)
-    '''
 
     # Hook up loggers for the robot state, the robot setpoints,
     # and the torque inputs.

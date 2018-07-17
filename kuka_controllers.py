@@ -1,22 +1,32 @@
 # -*- coding: utf8 -*-
 import math
+from matplotlib import cm
+import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.cluster import DBSCAN
 import random
 import time
 
 import pydrake
 from pydrake.all import (
+    AutoDiffXd,
     BasicVector,
     LeafSystem,
+    MathematicalProgram,
     PiecewisePolynomial,
     PortDataType,
+    RigidBodyTree
 )
 
 import kuka_ik
 import kuka_utils
 
 from underactuated import MeshcatRigidBodyVisualizer
+import meshcat
+import meshcat.transformations as tf
+import meshcat.geometry as g
 
+import vtk
 
 class KukaController(LeafSystem):
     def __init__(self, rbt, plant,
@@ -225,7 +235,7 @@ class ManipStateMachine(LeafSystem):
 
     def __init__(self, rbt_full, rbt_kuka, q_nom,
                  world_builder, hand_controller, kuka_controller,
-                 mrbv):
+                 mrbv, camera):
         LeafSystem.__init__(self)
         self.set_name("Food Flipping State Machine")
 
@@ -245,11 +255,15 @@ class ManipStateMachine(LeafSystem):
         self.hand_controller = hand_controller
         self.kuka_controller = kuka_controller
         self.mrbv = mrbv #MeshcatRigidBodyVisualizer(rbt_kuka, prefix="planviz")
+        self.camera = camera
     
         self.robot_state_input_port = \
             self._DeclareInputPort(PortDataType.kVectorValued,
                                    rbt_full.get_num_positions() +
                                    rbt_full.get_num_velocities())
+        self.depth_image_input_port = \
+            self._DeclareInputPort(PortDataType.kAbstractValued,
+                                   camera.depth_image_output_port().size())
 
         self._DeclareDiscreteState(1)
         self._DeclarePeriodicDiscreteUpdate(period_sec=0.01)
@@ -418,6 +432,96 @@ class ManipStateMachine(LeafSystem):
             self.q_traj_d = q_traj.derivative(1)
         return success
 
+    def _FitCylinders(self, q_kuka, context):      
+        self.mrbv.vis["perception"].delete() 
+        u_data = self.EvalAbstractInput(
+            context, self.depth_image_input_port.get_index()).get_value()
+        h, w, _ = u_data.data.shape
+        depth_image = np.empty((h, w), dtype=np.float32)
+        depth_image[:, :] = u_data.data[:, :, 0]
+        points = self.camera.ConvertDepthImageToPointCloud(
+            u_data, self.camera.depth_camera_info())
+        tf = self.camera.depth_camera_optical_pose().matrix()
+        points = tf.dot(np.vstack([points, np.ones(points.shape[1])]))[:3, :]
+        kinsol = self.rbt_kuka.doKinematics(q_kuka)
+        points = self.rbt_kuka.transformPoints(
+            kinsol, points,
+            self.rbt_kuka.findFrame("rgbd camera frame").get_frame_index(), 0)
+
+        ## Crop points a moderate amount above table
+        z_table = self.world_builder.table_top_z_in_world
+        min_height = z_table + 0.005
+        max_height = z_table + 0.1
+        points_selector = np.logical_and(points[2, :] >= min_height,
+                                         points[2, :] <= max_height)
+        object_points = points[:, points_selector]
+        table_selector = np.abs(points[2, :] - z_table) < 0.005
+        table_points = points[:, table_selector]
+
+        ## Geometric clustering
+        # http://scikit-learn.org/stable/auto_examples/cluster/plot_dbscan.html#sphx-glr-auto-examples-cluster-plot-dbscan-py
+        print "Clustering"
+        db = DBSCAN(eps=0.03, min_samples=10).fit(object_points.T)
+        unique_labels = set(db.labels_)
+        colors = [plt.cm.Spectral(each)
+                  for each in np.linspace(0, 1, len(unique_labels))]
+        for k, col in zip(unique_labels, colors):
+            if k == -1:
+                continue # will special-case "noise" points
+            class_member_mask = (db.labels_ == k)
+            cluster_points = object_points[:, class_member_mask]
+            self.mrbv.vis["perception"]["cluster_%02d" % k].set_object(
+                g.PointCloud(position=cluster_points,
+                             color=np.tile(np.array(col), [np.sum(class_member_mask), 1]).T,
+                             size=0.005))
+
+            # Try some point cloud fitting with SNOPT
+            prog = MathematicalProgram()
+            q = prog.NewContinuousVariables(6, "q")
+            prog.AddBoundingBoxConstraint(-2*np.pi, 2*np.pi, q[3:6])
+            prog.AddBoundingBoxConstraint(np.min(cluster_points, axis=1)-0.05,
+                                          np.max(cluster_points, axis=1)+0.05,
+                                          q[0:3])
+            prog.SetInitialGuess(q[0:3], np.mean(cluster_points, axis=1))
+            prog.SetInitialGuess(q[3:6], np.zeros(3))
+
+            sandbox_rbt = RigidBodyTree()
+            sandbox_builder = kuka_utils.ExperimentWorldBuilder()
+            sandbox_builder.add_cut_cylinder_to_tabletop(
+                sandbox_rbt, "cyl", init_pos=[0, 0, 0], init_rot=[0, 0, 0])
+            nq_sandbox = 6
+            def cost(q):
+                kinsol = sandbox_rbt.doKinematics([qi.value() for qi in q])
+                phi, normal, x, body_x, body_idx = sandbox_rbt.collisionDetectFromPoints(kinsol, cluster_points)
+                J_body_x = sandbox_rbt.transformPointsJacobian(kinsol, body_x, body_idx[0], 0, False)
+                err = cluster_points - x
+                total_error = np.sum(err.T.dot(err))
+                J = np.zeros(6)
+                for k in range(phi.shape[0]):
+                    print "THIS GRADIENT IS WRONG"
+                    J += 2.*err[:, k].dot(J_body_x[(k*3):((k+1)*3), :])
+                print "E: %f, with Jacobian " % total_error, J
+                return AutoDiffXd(total_error, J)
+            prog.AddCost(cost, q)
+            sandbox_mrbv = MeshcatRigidBodyVisualizer(sandbox_rbt, prefix="fit_%02d" % k, draw_timestep=0.01)
+            def callback(q):
+                sandbox_mrbv.draw(q)
+            prog.AddVisualizationCallback(callback, q)
+            #print prog.Solve()
+            #q_sol = prog.GetSolution(q)
+            print q_sol
+            #sandbox_mrbv.draw(q_sol)
+
+
+        noise_points = np.hstack([table_points, object_points[:, db.labels_ == -1]])
+        noise_point_colors = np.tile([0., 0., 0.], [noise_points.shape[1], 1]).T
+        self.mrbv.vis["perception"]["non-cluster"].set_object(
+            g.PointCloud(position=noise_points,
+                         color=noise_point_colors,
+                         size=0.005))
+
+
+
     def _DoCalcDiscreteVariableUpdates(self, context, events, discrete_state):
         # Call base method to ensure we do not get recursion.
         LeafSystem._DoCalcDiscreteVariableUpdates(
@@ -450,6 +554,8 @@ class ManipStateMachine(LeafSystem):
                 self.q_traj_d = None
                 print "State machine stuck"
         elif state[0] == self.STATE_MOVING_TO_NOMINAL and terminated:
+            #est_q_robot_full = self._FitCylinders(q_robot_full[0:self.nq_kuka],
+            #                                      context)
             if self._PlanFlip(q_robot_full, t):
                 state[0] = self.STATE_ATTEMPTING_FLIP
                 print "State machine attempting flip"
