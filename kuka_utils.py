@@ -75,7 +75,19 @@ class ExperimentWorldBuilder():
     def __init__(self):
         self.table_top_z_in_world = 0.736 + 0.057 / 2
         self.manipuland_body_indices = []
+        self.manipuland_params = []
         self.tabletop_indices = []
+        self.model_index_dict = {}
+
+    def add_model_wrapper(self, filename, floating_base_type, frame, rbt):
+        if filename.split(".")[-1] == "sdf":
+            model_instance_map = AddModelInstancesFromSdfString(
+                open(filename).read(), floating_base_type, frame, rbt)
+        else:
+            model_instance_map   = AddModelInstanceFromUrdfFile(
+                filename, floating_base_type, frame, rbt)
+        for key in model_instance_map.keys():
+            self.model_index_dict[key] = model_instance_map[key]
 
     def setup_kuka(self, rbt):
         iiwa_urdf_path = os.path.join(
@@ -97,79 +109,79 @@ class ExperimentWorldBuilder():
         table_frame_robot = RigidBodyFrame(
             "table_frame_robot", rbt.world(),
             [0.0, 0, 0], [0, 0, 0])
-        AddModelInstancesFromSdfString(
-            open(table_sdf_path).read(), FloatingBaseType.kFixed,
+        self.add_model_wrapper(table_sdf_path, FloatingBaseType.kFixed,
             table_frame_robot, rbt)
         self.tabletop_indices.append(rbt.get_num_bodies()-1)
         table_frame_fwd = RigidBodyFrame(
             "table_frame_fwd", rbt.world(),
             [0.7, 0, 0], [0, 0, 0])
-        AddModelInstancesFromSdfString(
-            open(table_sdf_path).read(), FloatingBaseType.kFixed,
+        self.add_model_wrapper(table_sdf_path, FloatingBaseType.kFixed,
             table_frame_fwd, rbt)
         self.tabletop_indices.append(rbt.get_num_bodies()-1)
 
         robot_base_frame = RigidBodyFrame(
             "robot_base_frame", rbt.world(),
             [0.0, 0, self.table_top_z_in_world], [0, 0, 0])
-        AddModelInstanceFromUrdfFile(iiwa_urdf_path, FloatingBaseType.kFixed,
-                                     robot_base_frame, rbt)
-
+        self.add_model_wrapper(iiwa_urdf_path, FloatingBaseType.kFixed,
+            robot_base_frame, rbt)
+        
         # Add gripper
         gripper_frame = rbt.findFrame("iiwa_frame_ee")
-        AddModelInstancesFromSdfString(
-            open(wsg50_sdf_path).read(), FloatingBaseType.kFixed,
+        self.add_model_wrapper(wsg50_sdf_path, FloatingBaseType.kFixed,
             gripper_frame, rbt)
 
-    def add_cut_cylinders_to_tabletop(self, rbt, n_objects,
-                                      do_convex_decomp=False):
+
+    def add_cut_cylinder_to_tabletop(self, rbt, model_name,
+        do_convex_decomp=False, init_pos=None, init_rot=None,
+        height=None, radius=None, cut_dir=None, cut_point=None):
         import mesh_creation
         import trimesh
-        for k in range(n_objects):
-            # Determine parameters of the cylinders
-            height = np.random.random() * 0.03 + 0.04
-            radius = np.random.random() * 0.02 + 0.01
-            cut_dir = np.array([1., 0., 0.])
-            cut_point = np.array([(np.random.random() - 0.5)*radius*1.,
-                                  0, 0])
-            cutting_planes = [(cut_point, cut_dir)]
+        # Determine parameters of the cylinders
+        height = height or np.random.random() * 0.03 + 0.04
+        radius = radius or np.random.random() * 0.02 + 0.01
+        cut_dir = cut_dir or np.array([1., 0., 0.])
+        cut_point = cut_point or np.array([
+            (np.random.random() - 0.5)*radius*1., 0, 0])
+        cutting_planes = [(cut_point, cut_dir)]
 
-            # Create a mesh programmatically for that cylinder
-            cyl = mesh_creation.create_cut_cylinder(
-                radius, height, cutting_planes, sections=20)
-            cyl.density = 1000.  # Same as water
-            init_pos = [0.4 + np.random.random()*0.2,
-                        -0.2 + np.random.random()*0.4,
-                        self.table_top_z_in_world+radius+0.001]
-            init_rot = np.random.random(3) * np.pi * 2.
-            #init_rot[0] = np.pi/2.
-            #init_rot[1] = 0.
-            #init_rot[2] = 0.
-            #init_pos[0:2] = [0.5, 0]
+        # Create a mesh programmatically for that cylinder
+        cyl = mesh_creation.create_cut_cylinder(
+            radius, height, cutting_planes, sections=20)
+        cyl.density = 1000.  # Same as water
+        init_pos = init_pos or [0.4 + np.random.random()*0.2,
+                                -0.2 + np.random.random()*0.4,
+                                self.table_top_z_in_world+radius+0.001]
+        init_rot = init_rot or np.random.random(3) * np.pi * 2.
+        
+        self.manipuland_params.append(dict(
+                height=height,
+                radius=radius,
+                cut_dir=cut_dir,
+                cut_point=cut_point,
+                init_pos=init_pos,
+                init_rot=init_rot
+            ))
+        # Save it out to a file and add it to the RBT
+        object_init_frame = RigidBodyFrame(
+            "object_init_frame_%s" % model_name, rbt.world(),
+            init_pos, init_rot)
 
-            # Save it out to a file and add it to the RBT
-            object_init_frame = RigidBodyFrame(
-                "object_init_frame_%f" % k, rbt.world(),
-                init_pos, init_rot)
-
-            if do_convex_decomp:  # more powerful, does a convex decomp
-                urdf_dir = "/tmp/mesh_%d/" % k
-                trimesh.io.urdf.export_urdf(cyl, urdf_dir)
-                urdf_path = urdf_dir + "mesh_%d.urdf" % k
-                AddModelInstanceFromUrdfFile(urdf_path,
-                                             FloatingBaseType.kRollPitchYaw,
-                                             object_init_frame, rbt)
-                self.manipuland_body_indices.append(rbt.get_num_bodies()-1)
-            else:
-                sdf_dir = "/tmp/mesh_%d/" % k
-                name = "mesh_%d" % k
-                mesh_creation.export_sdf(
-                    cyl, name, sdf_dir, color=[0.75, 0.5, 0.2, 1.])
-                sdf_path = sdf_dir + "mesh_%d.sdf" % k
-                AddModelInstancesFromSdfString(
-                    open(sdf_path).read(), FloatingBaseType.kRollPitchYaw,
-                    object_init_frame, rbt)
-                self.manipuland_body_indices.append(rbt.get_num_bodies()-1)
+        if do_convex_decomp:  # more powerful, does a convex decomp
+            urdf_dir = "/tmp/mesh_%s/" % model_name
+            trimesh.io.urdf.export_urdf(cyl, urdf_dir)
+            urdf_path = urdf_dir + "mesh_%s.urdf" % model_name
+            self.add_model_wrapper(urdf_path, FloatingBaseType.kRollPitchYaw,
+                                   object_init_frame, rbt)
+            self.manipuland_body_indices.append(rbt.get_num_bodies()-1)
+        else:
+            sdf_dir = "/tmp/mesh_%s/" % model_name
+            file_name = "mesh_%s" % model_name
+            mesh_creation.export_sdf(
+                cyl, file_name, sdf_dir, color=[0.75, 0.5, 0.2, 1.])
+            sdf_path = sdf_dir + "mesh_%s.sdf" % model_name
+            self.add_model_wrapper(sdf_path, FloatingBaseType.kRollPitchYaw,
+                                   object_init_frame, rbt)
+            self.manipuland_body_indices.append(rbt.get_num_bodies()-1)
 
     def project_rbt_to_nearest_feasible_on_table(self, rbt, q0):
         # Project arrangement to nonpenetration with IK
@@ -283,8 +295,8 @@ class RgbdCameraMeshcatVisualizer(LeafSystem):
             0)
 
         # Color points according to their normalized height
-        min_height = 0.0
-        max_height = 2.0
+        min_height = 0.6
+        max_height = 0.9
         colors = cm.jet(
             (points_in_world_frame[2, :]-min_height)/(max_height-min_height)
             ).T[0:3, :]

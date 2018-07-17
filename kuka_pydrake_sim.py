@@ -74,14 +74,28 @@ if __name__ == "__main__":
     rbt = RigidBodyTree()
     world_builder = kuka_utils.ExperimentWorldBuilder()
     world_builder.setup_kuka(rbt)
+    z_table = world_builder.table_top_z_in_world
     rbt_just_kuka = rbt.Clone()
-    world_builder.add_cut_cylinders_to_tabletop(rbt, args.n_objects)
+    for k in range(args.n_objects):
+        world_builder.add_cut_cylinder_to_tabletop(rbt, "cyl_%d" % k)
     rbt.compile()
     rbt_just_kuka.compile()
-    q0 = rbt.getZeroConfiguration()
+
+    # Figure out initial pose for the arm
+    ee_body=rbt_just_kuka.FindBody("right_finger").get_body_index()
+    ee_point=np.array([0.0, 0.03, 0.0])
+    end_effector_desired = np.array([0.5, 0.0, z_table+0.5, -np.pi/2., 0., 0.])
+    q0_kuka_seed = rbt_just_kuka.getZeroConfiguration()
     # "Center low" from IIWA stored_poses.json from Spartan
     # + closed hand
-    q0[0:9] = [-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38, 0., 0.0]
+    q0_kuka_seed[0:7] = np.array([-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38])
+    q0_kuka, info = kuka_ik.plan_ee_configuration(
+        rbt_just_kuka, q0_kuka_seed, q0_kuka_seed, end_effector_desired, ee_body,
+        ee_point, allow_collision=True, euler_limits=0.01)
+    if info != 1:
+        print "Info %d on IK for initial posture." % info
+    q0 = rbt.getZeroConfiguration()
+    q0[0:9] = q0_kuka
     q0 = world_builder.project_rbt_to_nearest_feasible_on_table(
         rbt, q0)
 
