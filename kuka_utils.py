@@ -85,6 +85,7 @@ class ExperimentWorldBuilder():
         self.manipuland_body_indices = []
         self.manipuland_params = []
         self.tabletop_indices = []
+        self.guillotine_blade_index = None
         self.model_index_dict = {}
         r, p, y = 2.4, 1.9, 3.8
         self.magic_rpy_offset = np.array([r, p, y])
@@ -115,8 +116,8 @@ class ExperimentWorldBuilder():
             [0.5, 0.0, self.table_top_z_in_world+0.5, -np.pi/2., 0., 0.])
         q0_kuka_seed = rbt_just_kuka.getZeroConfiguration()
         # "Center low" from IIWA stored_poses.json from Spartan
-        # + closed hand
-        q0_kuka_seed[0:7] = np.array([-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38])
+        # + closed hand + raised blade
+        q0_kuka_seed[0:10] = np.array([-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38, 0.0, 0.0, 1.5])
         q0_kuka, info = kuka_ik.plan_ee_configuration(
             rbt_just_kuka, q0_kuka_seed, q0_kuka_seed, end_effector_desired, ee_body,
             ee_point, allow_collision=True, euler_limits=0.01)
@@ -125,7 +126,7 @@ class ExperimentWorldBuilder():
 
         # Add objects + make random initial poses
         q0 = np.zeros(rbt.get_num_positions() + 6*n_objects)
-        q0[0:9] = q0_kuka
+        q0[0:10] = q0_kuka
         for k in range(n_objects):
             self.add_cut_cylinder_to_tabletop(rbt, "cyl_%d" % k)
             radius = self.manipuland_params[-1]["radius"]
@@ -133,11 +134,11 @@ class ExperimentWorldBuilder():
 
             # Remember to reverse effects of self.magic_rpy_offset
             new_pos = self.magic_rpy_rotmat.T.dot(np.array(
-                        [0.4 + np.random.random()*0.2,
-                         -0.2 + np.random.random()*0.4,
+                        [0.6, # 0.4 + np.random.random()*0.2,
+                         -0.2, #-0.2 + np.random.random()*0.4,
                          self.table_top_z_in_world+radius+0.001]))
 
-            new_rot = (np.random.random(3) * np.pi * 2.) - self.magic_rpy_offset
+            new_rot = 0*(np.random.random(3) * np.pi * 2.) - self.magic_rpy_offset
             q0[range(new_body.get_position_start_index(),
                      new_body.get_position_start_index()+6)] = np.hstack([new_pos, new_rot])
         rbt.compile()
@@ -145,7 +146,7 @@ class ExperimentWorldBuilder():
             rbt, q0)
         return rbt, rbt_just_kuka, q0_feas
 
-    def do_cut(self, rbt, x, cut_body_index, cut_pt, cut_direction):
+    def do_cut(self, rbt, x, cut_body_index, cut_pt, cut_normal):
         # Rebuilds the full rigid body tree, replacing cut_body_index
         # with one that is cut, but otherwise keeping the rest of the
         # tree the same. The new tree won't have the same body indices
@@ -171,6 +172,7 @@ class ExperimentWorldBuilder():
 
         k = 0
         for i, ind in enumerate(old_manipuland_indices):
+            print i, ind
             p = old_manipuland_params[i]
             if ind is cut_body_index:
                 for sign in [-1., 1.]:
@@ -178,8 +180,8 @@ class ExperimentWorldBuilder():
                         self.add_cut_cylinder_to_tabletop(new_rbt, "cyl_%d" % k,
                             height=p["height"],
                             radius=p["radius"],
-                            cut_dirs=p["cut_dirs"] + [cut_direction*sign],
-                            cut_points=p["cut_points"] + [cut_pt+cut_direction*sign*0.001])
+                            cut_dirs=p["cut_dirs"] + [cut_normal*sign],
+                            cut_points=p["cut_points"] + [cut_pt + cut_normal*sign*0.002])
                     except subprocess.CalledProcessError as e:
                         print "Failed a cut: ", e
                         continue # failed to cut
@@ -225,6 +227,8 @@ class ExperimentWorldBuilder():
             "examples", "kuka_iiwa_arm", "models", "table",
             "extra_heavy_duty_table_surface_only_collision.sdf")
 
+        guillotine_path = "guillotine.sdf"
+
         AddFlatTerrainToWorld(rbt)
         table_frame_robot = RigidBodyFrame(
             "table_frame_robot", rbt.world(),
@@ -250,6 +254,14 @@ class ExperimentWorldBuilder():
         self.add_model_wrapper(wsg50_sdf_path, FloatingBaseType.kFixed,
             gripper_frame, rbt)
 
+        # Add guillotine
+        guillotine_frame = RigidBodyFrame(
+            "guillotine_frame", rbt.world(),
+            [0.6, -0.41, self.table_top_z_in_world], [0, 0, 0])
+        self.add_model_wrapper(guillotine_path, FloatingBaseType.kFixed,
+            guillotine_frame, rbt)
+        self.guillotine_blade_index = rbt.FindBody("blade").get_body_index()
+
 
     def add_cut_cylinder_to_tabletop(self, rbt, model_name,
         do_convex_decomp=False, height=None, radius=None,
@@ -267,7 +279,7 @@ class ExperimentWorldBuilder():
         print "Cutting with cutting planes ", cutting_planes
         # Create a mesh programmatically for that cylinder
         cyl = mesh_creation.create_cut_cylinder(
-            radius, height, cutting_planes, sections=10)
+            radius, height, cutting_planes, sections=20)
         cyl.density = 1000.  # Same as water
         
         self.manipuland_params.append(dict(
@@ -311,26 +323,26 @@ class ExperimentWorldBuilder():
             active_group_names=set()))
 
         locked_position_inds = []
-        for body_i in range(rbt.get_num_bodies()):
-            if body_i in self.manipuland_body_indices:
-                constraints.append(ik.WorldPositionConstraint(
-                    model=rbt, body=body_i,
-                    pts=np.array([0., 0., 0.]),
-                    lb=np.array([0.4, -0.2, self.table_top_z_in_world]),
-                    ub=np.array([0.6, 0.2, self.table_top_z_in_world+0.3])))
-            else:
-                body = rbt.get_body(body_i)
-                if body.has_joint():
-                    for k in range(body.get_position_start_index(),
-                                   body.get_position_start_index() +
-                                   body.getJoint().get_num_positions()):
-                        locked_position_inds.append(k)
-
-        required_posture_constraint = ik.PostureConstraint(rbt)
-        required_posture_constraint.setJointLimits(
-            locked_position_inds, q0[locked_position_inds]-0.001,
-            q0[locked_position_inds]+0.001)
-        constraints.append(required_posture_constraint)
+        #for body_i in range(rbt.get_num_bodies()):
+        #    if body_i in self.manipuland_body_indices:
+        #        constraints.append(ik.WorldPositionConstraint(
+        #            model=rbt, body=body_i,
+        #            pts=np.array([0., 0., 0.]),
+        #            lb=np.array([0.4, -0.2, self.table_top_z_in_world]),
+        #            ub=np.array([0.6, 0.2, self.table_top_z_in_world+0.3])))
+        #    else:
+        #        body = rbt.get_body(body_i)
+        #        if body.has_joint():
+        #            for k in range(body.get_position_start_index(),
+        #                           body.get_position_start_index() +
+        #                           body.getJoint().get_num_positions()):
+        #                locked_position_inds.append(k)
+#
+        #required_posture_constraint = ik.PostureConstraint(rbt)
+        #required_posture_constraint.setJointLimits(
+        #    locked_position_inds, q0[locked_position_inds]-0.001,
+        #    q0[locked_position_inds]+0.001)
+        #constraints.append(required_posture_constraint)
 
         options = ik.IKoptions(rbt)
         options.setMajorIterationsLimit(10000)

@@ -1,0 +1,178 @@
+<?xml version='1.0'?>
+<sdf version='1.0'>
+  <model name='guillotine'>
+    <link name='base'>
+      <pose frame=''>0 0 0 0 0 0</pose>
+      <inertial>
+        <mass>1.0</mass>
+        <inertia>
+          <ixx>1.0</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1.0</iyy>
+          <iyz>0</iyz>
+          <izz>1.0</izz>
+        </inertia>
+        <pose frame=''>0 0.0 0 0 -0 0</pose>
+      </inertial>
+      <self_collide>0</self_collide>
+      <kinematic>0</kinematic>
+      <visual name='visual_left'>
+        <pose frame=''>0.05 0 .05 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.05 0.05 0.2</size>
+          </box>
+        </geometry>
+        <material>
+          <lighting>1</lighting>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Grey</name>
+          </script>
+          <ambient>0.3 0.3 0.3 1</ambient>
+          <diffuse>0.7 0.7 0.7 1</diffuse>
+          <specular>0.01 0.01 0.01 1</specular>
+          <emissive>0 0 0 1</emissive>
+          <shader type='vertex'>
+            <normal_map>__default__</normal_map>
+          </shader>
+        </material>
+        <cast_shadows>1</cast_shadows>
+        <transparency>0</transparency>
+      </visual>
+      <collision name='visual_left'>
+        <laser_retro>0</laser_retro>
+        <max_contacts>10</max_contacts>
+        <pose frame=''>0.05 0 .05 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.05 0.05 0.2</size>
+          </box>
+        </geometry>
+      </collision>
+    </link>
+    <link name='blade'>
+      <pose frame=''>0.0 0.0 0.0 0 0 0</pose>
+      <inertial>
+        <mass>0.25</mass>
+        <inertia>
+          <ixx>0.16</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.16</iyy>
+          <iyz>0</iyz>
+          <izz>0.16</izz>
+        </inertia>
+        <pose frame=''>0 0 0 0 -0 0</pose>
+      </inertial>
+      <self_collide>0</self_collide>
+      <kinematic>0</kinematic>
+      <visual name='cutting_blade'>
+        <pose frame=''>0 0.2 0.05 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.002 0.20 0.10</size>
+          </box>
+        </geometry>
+        <material>
+          <lighting>1</lighting>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Grey</name>
+          </script>
+          <ambient>0.7 0.7 0.7 1</ambient>
+          <diffuse>0.9 0.9 0.95 1</diffuse>
+          <specular>0.01 0.01 0.01 1</specular>
+          <emissive>0 0 0 1</emissive>
+          <shader type='vertex'>
+            <normal_map>__default__</normal_map>
+          </shader>
+        </material>
+        <cast_shadows>1</cast_shadows>
+        <transparency>0</transparency>
+      </visual>
+      <collision name='cutting_blade_collision'>
+        <laser_retro>0</laser_retro>
+        <max_contacts>10</max_contacts>
+        <pose frame=''>0 0.2 0.05 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.002 0.20 0.10</size>
+          </box>
+        </geometry>
+      </collision>
+
+      <visual name='blade_guard'>
+        <pose frame=''>0 0.075 0.1 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.03 0.15 0.03</size>
+          </box>
+        </geometry>
+        <material>
+          <lighting>1</lighting>
+          <script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Grey</name>
+          </script>
+          <ambient>0.7 0.7 0.7 1</ambient>
+          <diffuse>0.9 0.5 0.7 1</diffuse>
+          <specular>0.01 0.01 0.01 1</specular>
+          <emissive>0 0 0 1</emissive>
+          <shader type='vertex'>
+            <normal_map>__default__</normal_map>
+          </shader>
+        </material>
+        <cast_shadows>1</cast_shadows>
+        <transparency>0</transparency>
+      </visual>
+      <collision name='blade_guard_collision'>
+        <laser_retro>0</laser_retro>
+        <max_contacts>10</max_contacts>
+        <pose frame=''>0 0.15 0.1 0 -0 0</pose>
+        <geometry>
+          <box>
+            <size>0.03 0.15 0.03</size>
+          </box>
+        </geometry>
+      </collision>
+    </link>
+    <joint name='knife_joint' type='revolute'>
+      <parent>base</parent>
+      <child>blade</child>
+      <pose frame=''>0 0 0.1 0 -0 0</pose>
+      <axis>
+        <xyz>1 0 0</xyz>
+        <use_parent_model_frame>0</use_parent_model_frame>
+        <!-- Drake attaches an actuator to all and only joints with a nonzero
+             effort limit. -->
+        <limit>
+          <lower>-1.57</lower>
+          <upper>1.57</upper>
+          <effort>100</effort>
+          <stiffness>15000</stiffness>
+          <dissipation>50</dissipation>
+        </limit>
+        <dynamics>
+          <spring_reference>0</spring_reference>
+          <spring_stiffness>0</spring_stiffness>
+          <damping>0</damping>
+          <friction>0</friction>
+        </dynamics>
+      </axis>
+      <physics>
+        <ode>
+          <limit>
+            <cfm>0</cfm>
+            <erp>0.2</erp>
+          </limit>
+          <suspension>
+            <cfm>0</cfm>
+            <erp>0.2</erp>
+          </suspension>
+        </ode>
+      </physics>
+    </joint>
+  </model>
+</sdf>

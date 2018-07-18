@@ -185,6 +185,76 @@ class HandController(LeafSystem):
         y[:] = control_output[:]
 
 
+class GuillotineController(LeafSystem):
+    def __init__(self, rbt, plant,
+                 control_period=0.001):
+        LeafSystem.__init__(self)
+        self.set_name("GuillotineController Controller")
+
+        self.controlled_joint_names = [
+            "knife_joint"
+        ]
+
+        self.max_force = 100.
+
+        self.controlled_inds, _ = kuka_utils.extract_position_indices(
+            rbt, self.controlled_joint_names)
+
+        self.nu = plant.get_input_port(2).size()
+        self.nq = rbt.get_num_positions()
+
+        self.robot_state_input_port = \
+            self._DeclareInputPort(PortDataType.kVectorValued,
+                                   rbt.get_num_positions() +
+                                   rbt.get_num_velocities())
+
+        #self.setpoint_input_port = \
+        #    self._DeclareInputPort(PortDataType.kVectorValued,
+        #                           1)
+
+        self._DeclareDiscreteState(self.nu)
+        self._DeclarePeriodicDiscreteUpdate(period_sec=control_period)
+        self._DeclareVectorOutputPort(
+            BasicVector(self.nu),
+            self._DoCalcVectorOutput)
+
+    def _DoCalcDiscreteVariableUpdates(self, context, events, discrete_state):
+        # Call base method to ensure we do not get recursion.
+        # (This makes sure relevant event handlers get called.)
+        LeafSystem._DoCalcDiscreteVariableUpdates(
+            self, context, events, discrete_state)
+
+        new_control_input = discrete_state. \
+            get_mutable_vector().get_mutable_value()
+        x = self.EvalVectorInput(
+            context, self.robot_state_input_port.get_index()).get_value()
+
+        #gripper_width_des = self.EvalVectorInput(
+        #    context, self.setpoint_input_port.get_index()).get_value()
+
+        q_full = x[:self.nq]
+        v_full = x[self.nq:]
+
+        q = q_full[self.controlled_inds]
+        q_des = np.array([np.cos(context.get_time()*4.)*np.pi/4. + np.pi/4. - 0.1])
+        v = v_full[self.controlled_inds]
+        v_des = np.zeros(1)
+
+        qerr = q_des - q
+        verr = v_des - v
+
+        Kp = 1000.
+        Kv = 100.
+        new_control_input[:] = np.clip(
+            Kp * qerr + Kv * verr, -self.max_force, self.max_force)
+
+    def _DoCalcVectorOutput(self, context, y_data):
+        control_output = context.get_discrete_state_vector().get_value()
+        y = y_data.get_mutable_value()
+        # Get the ith finger control output
+        y[:] = control_output[:]
+
+
 class ManipStateMachine(LeafSystem):
     ''' Encodes the high-level logic
         for the manipulation system.
@@ -346,6 +416,10 @@ class ManipStateMachine(LeafSystem):
 
         collision_inds = []
         collision_inds += self.world_builder.manipuland_body_indices
+        collision_inds.append(self.rbt_full.FindBody(
+            "base", model_name="guillotine").get_body_index())
+        collision_inds.append(self.rbt_full.FindBody(
+            "blade", model_name="guillotine").get_body_index())
         collision_inds.append(self.rbt_full.FindBody("right_finger").get_body_index())
         collision_inds.append(self.rbt_full.FindBody("left_finger").get_body_index())
         for k in range(self.rbt_full.get_num_bodies()):
@@ -459,8 +533,9 @@ class ManipStateMachine(LeafSystem):
                 self.q_traj_d = None
                 print "State machine stuck"
 
-	if state[0] == self.STATE_STUCK:
-		raise StopIteration
+        if state[0] == self.STATE_STUCK:
+            state[0] = self.STATE_STARTUP
+            #raise StopIteration
 
     def _DoCalcKukaSetpointOutput(self, context, y_data):
         t = context.get_time()

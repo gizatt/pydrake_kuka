@@ -10,18 +10,20 @@ from pydrake.all import (
 )
 
 class CutException(Exception):
-    def __init__(self, cut_body_index, cut_pt, cut_direction):
+    def __init__(self, cut_body_index, cut_pt, cut_normal):
         # Call the base class constructor with the parameters it needs
         super(CutException, self).__init__("Cut was triggered.")
         self.cut_body_index = cut_body_index
         # Both of these should be in *body frame* of the cut object.
         self.cut_pt = cut_pt
-        self.cut_direction = cut_direction
+        self.cut_normal = cut_normal
 
 
 class CuttingGuard(LeafSystem):
-    def __init__(self, rbt, rbp, cutting_body_index, cut_direction, min_cut_force,
-                 cuttable_body_indices, timestep=0.01, name="Cutting Guard"):
+    def __init__(self, rbt, rbp, cutting_body_index, cut_direction,
+                 cut_normal, min_cut_force, cuttable_body_indices,
+                 timestep=0.01, name="Cutting Guard",
+                 last_cut_time = 0.):
         ''' Watches the RBT contact results output, and
         raises an exception (to pause simulation). '''
         LeafSystem.__init__(self)
@@ -30,7 +32,7 @@ class CuttingGuard(LeafSystem):
         self._DeclarePeriodicPublish(timestep, 0.0)
         self.rbt = rbt
         self.rbp = rbp
-        self.last_cut_time = 0.
+        self.last_cut_time = last_cut_time
 
         self.collision_id_to_body_index_map = {}
         for k in range(self.rbt.get_num_bodies()):
@@ -41,6 +43,8 @@ class CuttingGuard(LeafSystem):
         self.cutting_body_ids = rbt.get_body(cutting_body_index).get_collision_element_ids()
         self.cut_direction = np.array(cut_direction)
         self.cut_direction /= np.linalg.norm(self.cut_direction)
+        self.cut_normal = np.array(cut_normal)
+        self.cut_normal /= np.linalg.norm(self.cut_normal)
         self.min_cut_force = min_cut_force
         self.cuttable_body_indices = cuttable_body_indices
 
@@ -87,15 +91,19 @@ class CuttingGuard(LeafSystem):
                 kinsol = self.rbt.doKinematics(x[0:self.rbt.get_num_positions()])
                 tf = self.rbt.relativeTransform(kinsol, self.cutting_body_index, 0)
                 knife_body_force = tf[0:3, 0:3].dot(cut_force)
+                knife_body_pt = tf[0:3, 0:3].dot(cut_pt) + tf[0:3, 3]
                 print "Got potential cut with body %d: " % cut_body_index, " force ", knife_body_force
-                if knife_body_force.dot(self.cut_direction) > self.min_cut_force:
+                if -knife_body_force.dot(self.cut_direction) > self.min_cut_force:
                     # Trigger a cut exception!
-                    tf = self.rbt.relativeTransform(kinsol, cut_body_index, 0)
-                    cut_body_pt = tf[0:3, 0:3].dot(cut_pt) + tf[0:3, 3]
-                    cut_body_dir = tf[0:3, 0:3].dot(cut_force / np.linalg.norm(cut_force))
+                    tf = self.rbt.relativeTransform(kinsol, cut_body_index, self.cutting_body_index)
+                    cut_body_pt = tf[0:3, 0:3].dot(knife_body_pt) + tf[0:3, 3]
+                    cut_body_normal = tf[0:3, 0:3].dot(self.cut_normal)
+                    print tf, self.cut_normal, cut_body_normal
+
+                    # Further TF
                     print "Triggering cut!"
                     raise CutException(cut_body_index=cut_body_index,
-                                       cut_pt=cut_body_pt, cut_direction=cut_body_dir)
+                                       cut_pt=cut_body_pt, cut_normal=cut_body_normal)
 
 
 if __name__ == "__main__":

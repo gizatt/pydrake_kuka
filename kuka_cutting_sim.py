@@ -72,19 +72,19 @@ if __name__ == "__main__":
         n_objects = args.n_objects)
     x = np.zeros(rbt.get_num_positions() + rbt.get_num_velocities())
     x[0:q0.shape[0]] = q0
-
+    t = 0
     while 1:
         mrbv = MeshcatRigidBodyVisualizer(rbt, draw_timestep=0.01)
         # (wait while the visualizer warms up and loads in the models)
-        time.sleep(0.5)
+        mrbv.draw(x)
 
         # Make our RBT into a plant for simulation
         rbplant = RigidBodyPlant(rbt)
-        #allmaterials = CompliantMaterial()
-        #allmaterials.set_youngs_modulus(1E9)  # default 1E9
-        #allmaterials.set_dissipation(0.8)     # default 0.32
-        #allmaterials.set_friction(0.9)        # default 0.9.
-        #rbplant.set_default_compliant_material(allmaterials)
+        allmaterials = CompliantMaterial()
+        allmaterials.set_youngs_modulus(1E8)  # default 1E9
+        allmaterials.set_dissipation(0.8)     # default 0.32
+        allmaterials.set_friction(0.9)        # default 0.9.
+        rbplant.set_default_compliant_material(allmaterials)
 
         # Build up our simulation by spawning controllers and loggers
         # and connecting them to our plant.
@@ -111,6 +111,14 @@ if __name__ == "__main__":
         builder.Connect(hand_controller.get_output_port(0),
                         rbplant_sys.get_input_port(1))
 
+        # And the guillotine
+        knife_controller = builder.AddSystem(
+            kuka_controllers.GuillotineController(rbt, rbplant_sys))
+        builder.Connect(rbplant_sys.state_output_port(),
+                        knife_controller.robot_state_input_port)
+        builder.Connect(knife_controller.get_output_port(0),
+                        rbplant_sys.get_input_port(2))
+
         # Create a high-level state machine to guide the robot
         # motion...
         manip_state_machine = builder.AddSystem(
@@ -127,34 +135,22 @@ if __name__ == "__main__":
         builder.Connect(manip_state_machine.kuka_setpoint_output_port,
                         kuka_controller.setpoint_input_port)
 
-        cutting_guard_right = builder.AddSystem(
+        cutting_guard = builder.AddSystem(
             cutting_utils.CuttingGuard(
-                name="right finger cut guard",
+                name="blade cut guard",
                 rbt=rbt, rbp=rbplant,
-                cutting_body_index=rbt.FindBody("right_finger").get_body_index(),
-                cut_direction=[-1., 0., 0.],
-                min_cut_force=1.,
+                cutting_body_index=world_builder.guillotine_blade_index,
+                cut_direction=[0., 0., -1.],
+                cut_normal=[1., 0., 0.],
+                min_cut_force=10.,
                 cuttable_body_indices=world_builder.manipuland_body_indices,
-                timestep=0.001))
+                timestep=0.001,
+                last_cut_time = t))
         builder.Connect(rbplant_sys.state_output_port(),
-                        cutting_guard_right.state_input_port)
+                        cutting_guard.state_input_port)
         builder.Connect(rbplant_sys.contact_results_output_port(),
-                        cutting_guard_right.contact_results_input_port)
+                        cutting_guard.contact_results_input_port)
         
-        cutting_guard_left = builder.AddSystem(
-            cutting_utils.CuttingGuard(
-                name="left finger cut guard",
-                rbt=rbt, rbp=rbplant,
-                cutting_body_index=rbt.FindBody("left_finger").get_body_index(),
-                cut_direction=[1., 0., 0.],
-                min_cut_force=1.,
-                cuttable_body_indices=world_builder.manipuland_body_indices,
-                timestep=0.001))
-        builder.Connect(rbplant_sys.state_output_port(),
-                        cutting_guard_left.state_input_port)
-        builder.Connect(rbplant_sys.contact_results_output_port(),
-                        cutting_guard_left.contact_results_input_port)
-
         # Hook up loggers for the robot state, the robot setpoints,
         # and the torque inputs.
         def log_output(output_port, rate):
@@ -184,6 +180,17 @@ if __name__ == "__main__":
         # force the rest of the system to update every single time.
         simulator.set_publish_every_time_step(False)
 
+
+        # From iiwa_wsg_simulation.cc:
+        # When using the default RK3 integrator, the simulation stops
+        # advancing once the gripper grasps the box.  Grasping makes the
+        # problem computationally stiff, which brings the default RK3
+        # integrator to its knees.
+        timestep = 0.00005
+        integrator = RungeKutta2Integrator(diagram, timestep,
+                                           simulator.get_mutable_context())
+        simulator.reset_integrator(integrator)
+
         # The simulator simulates forward from a given Context,
         # so we adjust the simulator's initial Context to set up
         # the initial state.
@@ -192,29 +199,20 @@ if __name__ == "__main__":
         initial_state = np.zeros(x.shape)
         initial_state[0:x.shape[0]] = x.copy()
         state.SetFromVector(initial_state)
-
-
-        # From iiwa_wsg_simulation.cc:
-        # When using the default RK3 integrator, the simulation stops
-        # advancing once the gripper grasps the box.  Grasping makes the
-        # problem computationally stiff, which brings the default RK3
-        # integrator to its knees.
-        timestep = 0.0001
-        integrator = RungeKutta2Integrator(diagram, timestep,
-                                           simulator.get_mutable_context())
-        simulator.reset_integrator(integrator)
+        simulator.get_mutable_context().set_time(t)
 
         # This kicks off simulation. Most of the run time will be spent
         # in this call.
         try:
             simulator.StepTo(args.duration)
         except cutting_utils.CutException as e:
-            print "Handling cut event"
+            t = simulator.get_mutable_context().get_time()
+            print "Handling cut event at time %f" % t
             x = simulator.get_mutable_context().\
                 get_mutable_continuous_state_vector().CopyToVector()[0:x.shape[0]]
             rbt, x = world_builder.do_cut(
                 rbt, x, cut_body_index=e.cut_body_index, 
-                cut_pt=e.cut_pt, cut_direction=e.cut_direction)
+                cut_pt=e.cut_pt, cut_normal=e.cut_normal)
             continue
         except StopIteration:
             print "Terminated early"

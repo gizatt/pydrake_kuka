@@ -34,17 +34,18 @@ def create_cut_cylinder(radius, height, cutting_planes,
         normal = np.array(normal)
         point = np.dot(normal, point) * normal
         box_tf = np.eye(4)
-        # TF box to place +z along normal
-        if normal[2] != 0.:
-            roll = math.atan2(normal[0], normal[2])
-            pitch = math.atan2(normal[1], normal[2])
-            yaw = 0.
-        else:
-            roll = np.pi/2.
-            pitch = 0.
-            yaw = math.atan2(normal[0], normal[1])
-        box_tf[0:3, 0:3] = RotationMatrix(
-            RollPitchYaw(roll, pitch, yaw)).matrix()
+
+        # From https://math.stackexchange.com/questions/1956699/getting-a-transformation-matrix-from-a-normal-vector
+        nx, ny, nz = normal
+        if (nx**2 + ny**2 != 0.):
+            nxny = np.sqrt(nx**2 + ny**2)
+            box_tf[0, 0] = ny / nxny
+            box_tf[0, 1] = -nx / nxny
+            box_tf[1, 0] = nx*nz / nxny
+            box_tf[1, 1] = ny*nz / nxny
+            box_tf[1, 2] = -nxny
+            box_tf[2, :3] = normal
+        box_tf[:3, :3] = box_tf[:3, :3].T
         box_tf[0:3, 3] = (np.array(point) -
                           box_tf[0:3, 0:3].dot(
                             np.array([0., 0., box_size/2.])))
@@ -87,7 +88,7 @@ def export_sdf(mesh, name, directory, color=[0.75, 0.2, 0.2, 1.],
 
 if __name__ == "__main__":
     cyl = create_cut_cylinder(radius=3, height=5,
-                              cutting_planes=[([0., 0, 0], [-0.7, 0.7, 0])],
+                              cutting_planes=[([0., 0, 0], [0.7, 0.0, 0.7])],
                               sections=10, verbose=True)
     export_sdf(cyl, "test_mesh", "/tmp/test_mesh_export/")
     print open("/tmp/test_mesh_export/test_mesh.sdf").read()
