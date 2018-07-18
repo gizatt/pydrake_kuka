@@ -141,10 +141,10 @@ if __name__ == "__main__":
         cutting_utils.CuttingGuard(
             rbt=rbt, rbp=rbplant,
             cutting_body_index=rbt.FindBody("right_finger").get_body_index(),
-            blade_start_pt=[0., 0., 0.],
-            blade_stop_pt=[1., 0., 0.],
             cut_direction=[0., 1., 0.],
-            min_cut_force=1., blade_width=0.005, timestep=0.01))
+            min_cut_force=1.,
+            cuttable_body_indices=world_builder.manipuland_body_indices,
+            timestep=0.01))
     builder.Connect(rbplant_sys.state_output_port(),
                     cutting_guard.state_input_port)
     builder.Connect(rbplant_sys.contact_results_output_port(),
