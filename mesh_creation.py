@@ -38,6 +38,7 @@ def create_cut_cylinder(radius, height, cutting_planes,
         if normal[2] != 0.:
             roll = math.atan2(normal[0], normal[2])
             pitch = math.atan2(normal[1], normal[2])
+            yaw = 0.
         else:
             roll = np.pi/2.
             pitch = 0.
@@ -54,7 +55,9 @@ def create_cut_cylinder(radius, height, cutting_planes,
     if verbose:
         print "Computing difference between cylinder and %d boxes" % (
             len(cutting_planes))
-    return trimesh.boolean.difference(meshes, 'scad')
+    differences = trimesh.boolean.difference(meshes, 'scad')
+    chull = trimesh.convex.convex_hull(differences)
+    return chull
 
 
 def export_sdf(mesh, name, directory, color=[0.75, 0.2, 0.2, 1.],
