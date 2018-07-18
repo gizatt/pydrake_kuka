@@ -4,6 +4,7 @@ from copy import deepcopy
 import os.path
 from matplotlib import cm
 import numpy as np
+import subprocess
 import time
 
 import pydrake
@@ -28,6 +29,7 @@ import meshcat
 import meshcat.transformations as tf
 import meshcat.geometry as g
 
+from underactuated import MeshcatRigidBodyVisualizer
 
 def extract_position_indices(rbt, controlled_joint_names):
     ''' Given a RigidBodyTree and a list of
@@ -84,7 +86,11 @@ class ExperimentWorldBuilder():
         self.manipuland_params = []
         self.tabletop_indices = []
         self.model_index_dict = {}
-
+        r, p, y = 2.4, 1.9, 3.8
+        self.magic_rpy_offset = np.array([r, p, y])
+        self.magic_rpy_rotmat = RotationMatrix(
+            RollPitchYaw(r, p, y)).matrix()
+        
     def add_model_wrapper(self, filename, floating_base_type, frame, rbt):
         if filename.split(".")[-1] == "sdf":
             model_instance_map = AddModelInstancesFromSdfString(
@@ -94,6 +100,114 @@ class ExperimentWorldBuilder():
                 filename, floating_base_type, frame, rbt)
         for key in model_instance_map.keys():
             self.model_index_dict[key] = model_instance_map[key]
+
+    def setup_initial_world(self, n_objects):
+        # Construct the initial robot and its environment
+        rbt = RigidBodyTree()
+        self.setup_kuka(rbt)
+
+        rbt_just_kuka = rbt.Clone()
+        rbt_just_kuka.compile()
+        # Figure out initial pose for the arm
+        ee_body=rbt_just_kuka.FindBody("right_finger").get_body_index()
+        ee_point=np.array([0.0, 0.03, 0.0])
+        end_effector_desired = np.array(
+            [0.5, 0.0, self.table_top_z_in_world+0.5, -np.pi/2., 0., 0.])
+        q0_kuka_seed = rbt_just_kuka.getZeroConfiguration()
+        # "Center low" from IIWA stored_poses.json from Spartan
+        # + closed hand
+        q0_kuka_seed[0:7] = np.array([-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38])
+        q0_kuka, info = kuka_ik.plan_ee_configuration(
+            rbt_just_kuka, q0_kuka_seed, q0_kuka_seed, end_effector_desired, ee_body,
+            ee_point, allow_collision=True, euler_limits=0.01)
+        if info != 1:
+            print "Info %d on IK for initial posture." % info
+
+        # Add objects + make random initial poses
+        q0 = np.zeros(rbt.get_num_positions() + 6*n_objects)
+        q0[0:9] = q0_kuka
+        for k in range(n_objects):
+            self.add_cut_cylinder_to_tabletop(rbt, "cyl_%d" % k)
+            radius = self.manipuland_params[-1]["radius"]
+            new_body = rbt.get_body(self.manipuland_body_indices[-1])
+
+            # Remember to reverse effects of self.magic_rpy_offset
+            new_pos = self.magic_rpy_rotmat.T.dot(np.array(
+                        [0.4 + np.random.random()*0.2,
+                         -0.2 + np.random.random()*0.4,
+                         self.table_top_z_in_world+radius+0.001]))
+
+            new_rot = (np.random.random(3) * np.pi * 2.) - self.magic_rpy_offset
+            q0[range(new_body.get_position_start_index(),
+                     new_body.get_position_start_index()+6)] = np.hstack([new_pos, new_rot])
+        rbt.compile()
+        q0_feas = self.project_rbt_to_nearest_feasible_on_table(
+            rbt, q0)
+        return rbt, rbt_just_kuka, q0_feas
+
+    def do_cut(self, rbt, x, cut_body_index, cut_pt, cut_direction):
+        # Rebuilds the full rigid body tree, replacing cut_body_index
+        # with one that is cut, but otherwise keeping the rest of the
+        # tree the same. The new tree won't have the same body indices
+        # (for the manipulands and anything added after them) as the
+        # original.
+        old_manipuland_indices = deepcopy(self.manipuland_body_indices)
+        old_manipuland_params = deepcopy(self.manipuland_params)
+        self.__init__()
+
+        new_rbt = RigidBodyTree()
+        self.setup_kuka(new_rbt)
+
+
+        q_new = np.zeros(rbt.get_num_positions() + 6)
+        v_new = np.zeros(rbt.get_num_positions() + 6)
+        if rbt.get_num_positions() != rbt.get_num_velocities():
+            raise Exception("Can't handle nq != nv, sorry...")
+        def copy_state(from_indices, to_indices):
+            q_new[to_indices] = x[from_indices]
+            v_new[to_indices] = x[np.array(from_indices) + rbt.get_num_positions()]
+
+        copy_state(range(new_rbt.get_num_positions()), range(new_rbt.get_num_positions()))
+
+        k = 0
+        for i, ind in enumerate(old_manipuland_indices):
+            p = old_manipuland_params[i]
+            if ind is cut_body_index:
+                for sign in [-1., 1.]:
+                    try:
+                        self.add_cut_cylinder_to_tabletop(new_rbt, "cyl_%d" % k,
+                            height=p["height"],
+                            radius=p["radius"],
+                            cut_dirs=p["cut_dirs"] + [cut_direction*sign],
+                            cut_points=p["cut_points"] + [cut_pt+cut_direction*sign*0.001])
+                    except subprocess.CalledProcessError as e:
+                        print "Failed a cut: ", e
+                        continue # failed to cut
+                    k += 1
+                    copy_state(range(rbt.get_body(ind).get_position_start_index(),
+                                     rbt.get_body(ind).get_position_start_index() + 6),
+                               range(new_rbt.get_num_positions()-6,
+                                     new_rbt.get_num_positions()))
+            else:
+                self.add_cut_cylinder_to_tabletop(new_rbt, "cyl_%d" % k,
+                    height=p["height"],
+                    radius=p["radius"],
+                    cut_dirs=p["cut_dirs"],
+                    cut_points=p["cut_points"])
+                copy_state(range(rbt.get_body(ind).get_position_start_index(),
+                                 rbt.get_body(ind).get_position_start_index() + 6),
+                           range(new_rbt.get_num_positions()-6,
+                                 new_rbt.get_num_positions()))
+                k += 1
+
+        # Account for possible cut failures
+        q_new = q_new[:new_rbt.get_num_positions()]
+        v_new = v_new[:new_rbt.get_num_velocities()]
+
+        # Map old state into new state
+        new_rbt.compile()
+        q_new = self.project_rbt_to_nearest_feasible_on_table(new_rbt, q_new)
+        return new_rbt, np.hstack([q_new, v_new])
 
     def setup_kuka(self, rbt):
         iiwa_urdf_path = os.path.join(
@@ -165,7 +279,8 @@ class ExperimentWorldBuilder():
         # Save it out to a file and add it to the RBT
         object_init_frame = RigidBodyFrame(
             "object_init_frame_%s" % model_name, rbt.world(),
-            [0., 0., 0.], [0., 0., 0.])
+            np.zeros(3),
+            self.magic_rpy_offset)
 
         if do_convex_decomp:  # more powerful, does a convex decomp
             urdf_dir = "/tmp/mesh_%s/" % model_name
@@ -187,6 +302,8 @@ class ExperimentWorldBuilder():
     def project_rbt_to_nearest_feasible_on_table(self, rbt, q0):
         # Project arrangement to nonpenetration with IK
         constraints = []
+
+        q0 = np.clip(q0, rbt.joint_limit_min, rbt.joint_limit_max)
 
         constraints.append(ik.MinDistanceConstraint(
             model=rbt, min_distance=1E-3,
@@ -218,6 +335,7 @@ class ExperimentWorldBuilder():
         options = ik.IKoptions(rbt)
         options.setMajorIterationsLimit(10000)
         options.setIterationsLimit(100000)
+        options.setQ(np.eye(rbt.get_num_positions())*1E6)
         results = ik.InverseKin(
             rbt, q0, q0, constraints, options)
 

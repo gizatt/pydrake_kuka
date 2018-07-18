@@ -322,7 +322,7 @@ class ManipStateMachine(LeafSystem):
                 touch_dir /= np.linalg.norm(touch_dir)
 
                 # Try attacking in a couple of directions
-                for t in np.linspace(-0.5, 0.5, 8):
+                for t in np.linspace(-0.2, 0.2, 3):
                     rotation = np.array([[np.cos(t), -np.sin(t)],
                                          [np.sin(t), np.cos(t)]])
                     new_touch_dir = np.zeros(3)
@@ -387,7 +387,7 @@ class ManipStateMachine(LeafSystem):
 
             # If that checked out, make a real trajectory to hit all of those
             # points
-            ts = np.array([0., 0.5, 0.75, 1.0])
+            ts = np.array([0., 0.5, 1.0, 1.5])
             traj_seed = PiecewisePolynomial.Pchip(
                 ts + start_time, np.vstack([q0, q_reach, q_touch, q_flip]).T, True)
             q_traj = traj_seed

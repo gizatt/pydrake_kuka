@@ -21,11 +21,11 @@ class CutException(Exception):
 
 class CuttingGuard(LeafSystem):
     def __init__(self, rbt, rbp, cutting_body_index, cut_direction, min_cut_force,
-                 cuttable_body_indices, timestep=0.01):
+                 cuttable_body_indices, timestep=0.01, name="Cutting Guard"):
         ''' Watches the RBT contact results output, and
         raises an exception (to pause simulation). '''
         LeafSystem.__init__(self)
-        self.set_name('Cutting Guard')
+        self.set_name(name)
 
         self._DeclarePeriodicPublish(timestep, 0.0)
         self.rbt = rbt
