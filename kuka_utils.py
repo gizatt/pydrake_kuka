@@ -1,5 +1,6 @@
 # -*- coding: utf8 -*-
 
+from copy import deepcopy
 import os.path
 from matplotlib import cm
 import numpy as np
@@ -15,10 +16,13 @@ from pydrake.all import (
     LeafSystem,
     PortDataType,
     RigidBodyFrame,
+    RigidBodyTree,
     RollPitchYaw,
     RotationMatrix
 )
 from pydrake.solvers import ik
+
+import kuka_ik
 
 import meshcat
 import meshcat.transformations as tf
@@ -70,6 +74,8 @@ def visualize_plan_with_meshcat(rbt, pbrv, qtraj, sample_time=0.05):
         q = qtraj.value(t)[:]
         pbrv.draw(q)
         time.sleep(sample_time)
+
+
 
 class ExperimentWorldBuilder():
     def __init__(self):
@@ -132,39 +138,34 @@ class ExperimentWorldBuilder():
 
 
     def add_cut_cylinder_to_tabletop(self, rbt, model_name,
-        do_convex_decomp=False, init_pos=None, init_rot=None,
-        height=None, radius=None, cut_dir=None, cut_point=None):
+        do_convex_decomp=False, height=None, radius=None,
+        cut_dirs=None, cut_points=None):
         import mesh_creation
         import trimesh
         # Determine parameters of the cylinders
         height = height or np.random.random() * 0.03 + 0.04
         radius = radius or np.random.random() * 0.02 + 0.01
-        cut_dir = cut_dir or np.array([1., 0., 0.])
-        cut_point = cut_point or np.array([
-            (np.random.random() - 0.5)*radius*1., 0, 0])
-        cutting_planes = [(cut_point, cut_dir)]
-
+        if cut_dirs is None:
+            cut_dirs = [np.array([1., 0., 0.])]
+        if cut_points is None:
+            cut_points = [np.array([(np.random.random() - 0.5)*radius*1., 0, 0])]
+        cutting_planes = zip(cut_points, cut_dirs)
+        print "Cutting with cutting planes ", cutting_planes
         # Create a mesh programmatically for that cylinder
         cyl = mesh_creation.create_cut_cylinder(
-            radius, height, cutting_planes, sections=20)
+            radius, height, cutting_planes, sections=10)
         cyl.density = 1000.  # Same as water
-        init_pos = init_pos or [0.4 + np.random.random()*0.2,
-                                -0.2 + np.random.random()*0.4,
-                                self.table_top_z_in_world+radius+0.001]
-        init_rot = init_rot or np.random.random(3) * np.pi * 2.
         
         self.manipuland_params.append(dict(
                 height=height,
                 radius=radius,
-                cut_dir=cut_dir,
-                cut_point=cut_point,
-                init_pos=init_pos,
-                init_rot=init_rot
+                cut_dirs=cut_dirs,
+                cut_points=cut_points
             ))
         # Save it out to a file and add it to the RBT
         object_init_frame = RigidBodyFrame(
             "object_init_frame_%s" % model_name, rbt.world(),
-            init_pos, init_rot)
+            [0., 0., 0.], [0., 0., 0.])
 
         if do_convex_decomp:  # more powerful, does a convex decomp
             urdf_dir = "/tmp/mesh_%s/" % model_name

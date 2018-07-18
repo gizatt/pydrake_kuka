@@ -275,7 +275,7 @@ class ManipStateMachine(LeafSystem):
         success = False
         for k in range(self.n_replan_attempts_nominal):
             qtraj, info = kuka_ik.plan_trajectory_to_posture(
-                self.rbt_full, q0, self.q_nom, 10, 0.5, start_time)
+                self.rbt_full, q0, self.q_nom, 10, 1.0, start_time)
             if info not in [1, 3, 100]:
                 print "Got error code, trying again."
                 continue
@@ -426,7 +426,7 @@ class ManipStateMachine(LeafSystem):
         state = discrete_state. \
             get_mutable_vector().get_mutable_value()
         if not self.initialized:
-            state[0] = self.STATE_MOVING_TO_NOMINAL
+            state[0] = self.STATE_STARTUP
             self.initialized = True
 
         t = context.get_time()
