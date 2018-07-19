@@ -73,8 +73,10 @@ if __name__ == "__main__":
     x = np.zeros(rbt.get_num_positions() + rbt.get_num_velocities())
     x[0:q0.shape[0]] = q0
     t = 0
+    clear_vis = True
     while 1:
-        mrbv = MeshcatRigidBodyVisualizer(rbt, draw_timestep=0.01)
+        mrbv = MeshcatRigidBodyVisualizer(rbt, draw_timestep=0.01, clear_vis=clear_vis)
+        clear_vis = False
         # (wait while the visualizer warms up and loads in the models)
         mrbv.draw(x)
 
