@@ -95,11 +95,10 @@ if __name__ == "__main__":
         # placed into it.
         rbplant_sys = builder.AddSystem(rbplant)
 
-
         # Spawn the controller that drives the Kuka to its
         # desired posture.
         kuka_controller = builder.AddSystem(
-            kuka_controllers.KukaController(rbt, rbplant_sys))
+            kuka_controllers.InstantaneousKukaController(rbt, rbplant_sys))
         builder.Connect(rbplant_sys.state_output_port(),
                         kuka_controller.robot_state_input_port)
         builder.Connect(kuka_controller.get_output_port(0),
@@ -123,19 +122,16 @@ if __name__ == "__main__":
 
         # Create a high-level state machine to guide the robot
         # motion...
-        manip_state_machine = builder.AddSystem(
-            kuka_controllers.ManipStateMachine(
-                rbt, rbt_just_kuka, x[0:7],
-                world_builder=world_builder,
-                hand_controller=hand_controller,
-                kuka_controller=kuka_controller,
-                mrbv = mrbv))
+        task_planner = builder.AddSystem(
+            kuka_controllers.TaskPlanner(rbt, q0))
         builder.Connect(rbplant_sys.state_output_port(),
-                        manip_state_machine.robot_state_input_port)
-        builder.Connect(manip_state_machine.hand_setpoint_output_port,
+                        task_planner.robot_state_input_port)
+        builder.Connect(task_planner.hand_setpoint_output_port,
                         hand_controller.setpoint_input_port)
-        builder.Connect(manip_state_machine.kuka_setpoint_output_port,
+        builder.Connect(task_planner.kuka_setpoint_output_port,
                         kuka_controller.setpoint_input_port)
+        builder.Connect(task_planner.knife_setpoint_output_port,
+                        knife_controller.setpoint_input_port)
 
         cutting_guard = builder.AddSystem(
             cutting_utils.CuttingGuard(
@@ -161,8 +157,8 @@ if __name__ == "__main__":
             builder.Connect(output_port, logger.get_input_port(0))
             return logger
         state_log = log_output(rbplant_sys.get_output_port(0), 60.)
-        setpoint_log = log_output(
-            manip_state_machine.kuka_setpoint_output_port, 60.)
+        #setpoint_log = log_output(
+        #    task_planner.kuka_setpoint_output_port, 60.)
         kuka_control_log = log_output(
             kuka_controller.get_output_port(0), 60.)
 

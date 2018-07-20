@@ -6,11 +6,15 @@ import time
 
 import pydrake
 from pydrake.all import (
+    AbstractValue,
+    AutoDiffXd,
     BasicVector,
     LeafSystem,
+    MathematicalProgram,
     PiecewisePolynomial,
     PortDataType,
 )
+from pydrake.forwarddiff import jacobian
 
 import kuka_ik
 import kuka_utils
@@ -18,12 +22,34 @@ import kuka_utils
 from underactuated import MeshcatRigidBodyVisualizer
 
 
-class KukaController(LeafSystem):
+class InstantaneousKukaControllerSetpoint():
+    def __init__(
+        self, ee_pt_des=None, ee_v_des=None, ee_frame=None, 
+        ee_pt=None, ee_x_des=None, ee_y_des=None, ee_z_des=None,
+        q_des=None, v_des=None, Kq=0., Kv=0., Ka=0., Kee_pt=0.,
+        Kee_xyz=0., Kee_v=0.):
+        self.ee_frame = ee_frame    # frame id
+        self.ee_pt = ee_pt          # 3x1, pt in ee frame
+        self.ee_pt_des = ee_pt_des    # 3x1, world frame
+        self.ee_x_des = ee_x_des    # 3x1, world frame, where ee frame +x axis should point in world frame
+        self.ee_y_des = ee_y_des    # 3x1, world frame, where ee frame +y axis should point in world frame
+        self.ee_z_des = ee_z_des    # 3x1, world frame, where ee frame +z axis should point in world frame
+        self.ee_v_des = ee_v_des    # 3x1, world frame
+        self.q_des = q_des          # nq x 1
+        self.v_des = v_des          # nv x 1
+        self.Kq = Kq                # nq x nq or scalar
+        self.Kv = Kv                # nv x nv or scalar
+        self.Ka = Ka                # nv x nv or scalar
+        self.Kee_pt = Kee_pt          # 3x3 or scalar
+        self.Kee_xyz = Kee_xyz      # 3x3 or scalar
+        self.Kee_v = Kee_v          # 3x3 or scalar
+
+class InstantaneousKukaController(LeafSystem):
     def __init__(self, rbt, plant,
-                 control_period=0.005,
+                 control_period=0.05,
                  print_period=0.5):
         LeafSystem.__init__(self)
-        self.set_name("Kuka Controller")
+        self.set_name("Instantaneous Kuka Controller")
 
         self.controlled_joint_names = [
             "iiwa_joint_1",
@@ -37,6 +63,7 @@ class KukaController(LeafSystem):
 
         self.controlled_inds, _ = kuka_utils.extract_position_indices(
             rbt, self.controlled_joint_names)
+
         # Extract the full-rank bit of B, and verify that it's full rank
         self.nq_reduced = len(self.controlled_inds)
         self.B = np.empty((self.nq_reduced, self.nq_reduced))
@@ -45,17 +72,21 @@ class KukaController(LeafSystem):
                 self.B[k, l] = rbt.B[self.controlled_inds[k],
                                      self.controlled_inds[l]]
         if np.linalg.matrix_rank(self.B) < self.nq_reduced:
-            print "The joint set specified is underactuated."
-            sys.exit(-1)
+            raise RuntimeError("The joint set specified is underactuated.")
+
         self.B_inv = np.linalg.inv(self.B)
+
         # Copy lots of stuff
         self.rbt = rbt
         self.nq = rbt.get_num_positions()
         self.plant = plant
-        self.nu = plant.get_input_port(0).size()
+        self.nu = plant.get_input_port(0).size() # hopefully matches
+        if self.nu != self.nq_reduced:
+            raise RuntimeError("plant input port not equal to number of controlled joints")
         self.print_period = print_period
         self.last_print_time = -print_period
         self.shut_up = False
+        self.control_period = control_period
 
         self.robot_state_input_port = \
             self._DeclareInputPort(PortDataType.kVectorValued,
@@ -63,9 +94,7 @@ class KukaController(LeafSystem):
                                    rbt.get_num_velocities())
 
         self.setpoint_input_port = \
-            self._DeclareInputPort(PortDataType.kVectorValued,
-                                   rbt.get_num_positions() +
-                                   rbt.get_num_velocities())
+            self._DeclareInputPort(PortDataType.kAbstractValued, 0)
 
         self._DeclareDiscreteState(self.nu)
         self._DeclarePeriodicDiscreteUpdate(period_sec=control_period)
@@ -83,24 +112,111 @@ class KukaController(LeafSystem):
             get_mutable_vector().get_mutable_value()
         x = self.EvalVectorInput(
             context, self.robot_state_input_port.get_index()).get_value()
-        x_des = self.EvalVectorInput(
+        setpoint = self.EvalAbstractInput(
             context, self.setpoint_input_port.get_index()).get_value()
-        q = x[:self.nq]
-        v = x[self.nq:]
-        q_des = x_des[:self.nq]
-        v_des = x_des[self.nq:]
 
-        qerr = (q_des[self.controlled_inds] - q[self.controlled_inds])
-        verr = (v_des[self.controlled_inds] - v[self.controlled_inds])
+        q_full = x[:self.nq]
+        v_full = x[self.nq:]
+        q = x[self.controlled_inds]
+        v = x[self.nq:][self.controlled_inds]
 
-        kinsol = self.rbt.doKinematics(q, v)
-        # Get the full LHS of the manipulator equations
-        # given the current config and desired accelerations
-        vd_des = np.zeros(self.rbt.get_num_positions())
-        vd_des[self.controlled_inds] = 1000.*qerr + 100*verr
-        lhs = self.rbt.inverseDynamics(kinsol, external_wrenches={}, vd=vd_des)
-        new_u = self.B_inv.dot(lhs[self.controlled_inds])
-        new_control_input[:] = new_u
+        kinsol = self.rbt.doKinematics(q_full, v_full)
+
+        M_full = self.rbt.massMatrix(kinsol)
+        C = self.rbt.dynamicsBiasTerm(kinsol, {}, None)[self.controlled_inds]
+        # Python slicing doesn't work in 2D, so do it row-by-row
+        M = np.zeros((self.nq_reduced, self.nq_reduced))
+        for k in range(self.nq_reduced):
+            M[:, k] = M_full[self.controlled_inds, k]
+
+        # Pick a qdd that results in minimum deviation from the desired
+        # end effector pose (according to the end effector frame's jacobian
+        # at the current state)
+        # v_next = v + control_period * qdd
+        # q_next = q + control_period * (v + v_next) / 2.
+        # ee_v = J*v
+        # ee_p = from forward kinematics
+        # ee_v_next = J*v_next
+        # ee_p_next = ee_p + control_period * (ee_v + ee_v_next) / 2.
+        # min  u and qdd
+        #        || q_next - q_des ||_Kq
+        #     +  || v_next - v_des ||_Kv
+        #     +  || qdd ||_Ka
+        #     +  || Kee_v - ee_v_next ||_Kee_pt
+        #     +  || Kee_pt - ee_p_next ||_Kee_v
+        #     +  the messily-implemented angular ones?
+        # s.t. M qdd + C = B u
+        # (no contact modeling for now)
+        prog = MathematicalProgram()
+        qdd = prog.NewContinuousVariables(self.nq_reduced, "qdd")
+        u = prog.NewContinuousVariables(self.nu, "u")
+
+        prog.AddQuadraticCost(qdd.T.dot(setpoint.Ka).dot(qdd))
+
+        v_next = v + self.control_period * qdd
+        q_next = q + self.control_period * (v + v_next) / 2.
+        if setpoint.v_des is not None:
+            v_err = setpoint.v_des - v_next
+            prog.AddQuadraticCost(v_err.T.dot(setpoint.Kv).dot(v_err))
+        if setpoint.q_des is not None:
+            q_err = setpoint.q_des - q_next
+            prog.AddQuadraticCost(q_err.T.dot(setpoint.Kq).dot(q_err))
+
+        if setpoint.ee_frame is not None and setpoint.ee_pt is not None:
+            # Convert x to autodiff for Jacobians computation
+            q_full_ad = np.empty(self.nq, dtype=AutoDiffXd)
+            for i in range(self.nq):
+                der = np.zeros(self.nq)
+                der[i] = 1
+                q_full_ad.flat[i] = AutoDiffXd(q_full.flat[i], der)
+            kinsol_ad = self.rbt.doKinematics(q_full_ad)
+
+            tf_ad = self.rbt.relativeTransform(kinsol_ad, 0, setpoint.ee_frame)
+            
+            # Compute errors in EE pt position and velocity (in world frame)
+            ee_p_ad = tf_ad[0:3, 0:3].dot(setpoint.ee_pt) + tf_ad[0:3, 3]
+            ee_p = np.hstack([y.value() for y in ee_p_ad])
+
+            J_ee = np.vstack([y.derivatives() for y in ee_p_ad]).reshape(3, self.nq)
+            J_ee = J_ee[:, self.controlled_inds]
+
+            ee_v = J_ee.dot(v)
+            ee_v_next = J_ee.dot(v_next)
+            ee_p_next = ee_p + self.control_period * (ee_v + ee_v_next) / 2.
+
+            if setpoint.ee_pt_des is not None:
+                ee_p_err = setpoint.ee_pt_des - ee_p_next
+                prog.AddQuadraticCost(ee_p_err.T.dot(setpoint.Kee_pt).dot(ee_p_err))
+            if setpoint.ee_v_des is not None:
+                ee_v_err = setpoint.ee_v_des - ee_v_next
+                prog.AddQuadraticCost(ee_v_err.T.dot(setpoint.Kee_v).dot(ee_v_err))
+
+            # Also compute errors in EE cardinal vector directions vs targets in world frame
+            for i, vec in enumerate(
+                    (setpoint.ee_x_des, setpoint.ee_y_des, setpoint.ee_z_des)):
+                if vec is not None:
+                    direction = np.zeros(3)
+                    direction[i] = 1.
+                    ee_dir_ad = tf_ad[0:3, 0:3].dot(direction)
+                    ee_dir_p = np.hstack([y.value() for y in ee_dir_ad])
+                    J_ee_dir = np.vstack([y.derivatives() for y in ee_dir_ad]).reshape(3, self.nq)
+                    J_ee_dir = J_ee_dir[:, self.controlled_inds]
+                    ee_dir_v = J_ee_dir.dot(v)
+                    ee_dir_v_next = J_ee_dir.dot(v_next)
+                    ee_dir_p_next = ee_dir_p + self.control_period * (ee_dir_v + ee_dir_v_next) / 2.
+                    ee_dir_p_err = vec - ee_dir_p_next
+                    prog.AddQuadraticCost(ee_dir_p_err.T.dot(setpoint.Kee_xyz).dot(ee_dir_p_err))
+
+
+
+        LHS = np.dot(M, qdd) + C
+        RHS = np.dot(self.B, u)
+        for i in range(self.nq_reduced):
+            prog.AddLinearConstraint(LHS[i] == RHS[i])
+
+        result = prog.Solve()
+        u = prog.GetSolution(u)
+        new_control_input[:] = u
 
     def _DoCalcVectorOutput(self, context, y_data):
         if (self.print_period and
@@ -110,7 +226,6 @@ class KukaController(LeafSystem):
             self.last_print_time = context.get_time()
         control_output = context.get_discrete_state_vector().get_value()
         y = y_data.get_mutable_value()
-        # Get the ith finger control output
         y[:] = control_output[:]
 
 
@@ -208,9 +323,9 @@ class GuillotineController(LeafSystem):
                                    rbt.get_num_positions() +
                                    rbt.get_num_velocities())
 
-        #self.setpoint_input_port = \
-        #    self._DeclareInputPort(PortDataType.kVectorValued,
-        #                           1)
+        self.setpoint_input_port = \
+            self._DeclareInputPort(PortDataType.kVectorValued,
+                                   1)
 
         self._DeclareDiscreteState(self.nu)
         self._DeclarePeriodicDiscreteUpdate(period_sec=control_period)
@@ -229,14 +344,13 @@ class GuillotineController(LeafSystem):
         x = self.EvalVectorInput(
             context, self.robot_state_input_port.get_index()).get_value()
 
-        #gripper_width_des = self.EvalVectorInput(
-        #    context, self.setpoint_input_port.get_index()).get_value()
+        q_des = self.EvalVectorInput(
+            context, self.setpoint_input_port.get_index()).get_value()
 
         q_full = x[:self.nq]
         v_full = x[self.nq:]
 
         q = q_full[self.controlled_inds]
-        q_des = np.array([np.cos(context.get_time()*4.)*np.pi/4. + np.pi/4. - 0.1])
         v = v_full[self.controlled_inds]
         v_des = np.zeros(1)
 
@@ -251,60 +365,141 @@ class GuillotineController(LeafSystem):
     def _DoCalcVectorOutput(self, context, y_data):
         control_output = context.get_discrete_state_vector().get_value()
         y = y_data.get_mutable_value()
-        # Get the ith finger control output
         y[:] = control_output[:]
 
 
-class ManipStateMachine(LeafSystem):
-    ''' Encodes the high-level logic
-        for the manipulation system.
+class TaskPrimitive():
+    def __init__():
+        pass
 
-        It pulls the robotic to a nominal pose, and then
-        (given as input a list of all of the cut cylinder
-        poses) repeatedly tries to plan collision-free
-        trajectories to a pose goal relative to a flippable
-        edge.
+    def CalcSetpointOutput(context, setpoint_object):
+        raise NotImplementedError()
 
-        States:
-           - Returning to nominal
-           - Executing flip
+    @staticmethod
+    def CalcExpectedCost(context):
+        ''' Can return Infinity if using this primitive,
+            given the context, is infeasible or pointless. '''
+        raise NotImplementedError()
 
-        A flip plan is an open-loop joint trajectory that
-        get the end effector to the object (stage 1), moves
-        inwards towards the object until contact is made
-        (stage 2), and then does an open-loop flip maneuver
-        (stage 3).
 
-        TODO in future: better control with contact:
-        A "flip" plan comes with a couple of parts:
-            - A joint trajectory to get the end effect
-             close to the target point on the surface
-            - The actual target point on the surface
-              of both the gripper and the object, which
-              we want to bring into contact
-            - A pose trajectory of the object we want
-              to achieve, along with a trajectory of
-              the gripper
+class IdlePrimitive():
+    def __init__(self, rbt, q_nom):
+        self.q_nom = q_nom
+        self.rbt = rbt
+        self.nq = 7
+        self.nv = 7
 
-    '''
+    def CalcSetpointOutput(self, context, setpoint_object):
+        setpoint_object.Ka = 1.0
+        setpoint_object.Kq = 1000000.
+        setpoint_object.Kv = 1000.
+        setpoint_object.Kee_pt = 1000000.
+        setpoint_object.Kee_xyz = 500000.
+        setpoint_object.Kee_v = 5000.
+
+        #setpoint_object.q_des = self.q_nom[0:7] + 0.1
+        setpoint_object.v_des = np.zeros(self.nv)
+        setpoint_object.ee_frame = self.rbt.findFrame(
+            "iiwa_frame_ee").get_frame_index()
+        setpoint_object.ee_pt = np.zeros(3)
+        t = context.get_time()
+        setpoint_object.ee_pt_des = np.array([0.*np.sin(t)*0.2 + 0.5,
+                                             0.*np.sin(t*2.)*0.5,
+                                             1.0])
+        setpoint_object.ee_v_des = np.array([0., 0., 0.])
+        setpoint_object.ee_x_des = np.array([0., 1., 0.])
+        setpoint_object.ee_y_des = np.array([0., 0., -1.])
+
+    @staticmethod
+    def CalcExpectedCost(context, rbt):
+        return 1.
+
+
+class TaskPlanner(LeafSystem):
 
     STATE_STARTUP = -1
+
+    def __init__(self, rbt_full, q_nom):
+        LeafSystem.__init__(self)
+        self.set_name("Task Planner")
+
+        self.rbt_full = rbt_full
+        self.q_nom = q_nom
+        self.nq_full = rbt_full.get_num_positions()
+        self.nv_full = rbt_full.get_num_velocities()
+        self.nu_full = rbt_full.get_num_actuators()
+
+        self.robot_state_input_port = \
+            self._DeclareInputPort(PortDataType.kVectorValued,
+                                   self.nq_full + self.nv_full)
+
+        self._DeclareDiscreteState(1)
+        self._DeclarePeriodicDiscreteUpdate(period_sec=0.01)
+        # TODO set default state somehow better. Requires new
+        # bindings to override AllocateDiscreteState or something else.
+        self.initialized = False
+        self.current_primitive = IdlePrimitive(self.rbt_full, q_nom)
+        self.kuka_setpoint = self._DoAllocKukaSetpointOutput()
+        self.gripper_setpoint = 0.
+        self.knife_setpoint = np.pi/2.
+
+        # TODO The controller takes full state in, even though it only
+        # controls the Kuka... that should be tidied up.
+        self.kuka_setpoint_output_port = \
+            self._DeclareAbstractOutputPort(
+                self._DoAllocKukaSetpointOutput,
+                self._DoCalcKukaSetpointOutput)
+
+        self.hand_setpoint_output_port = \
+            self._DeclareVectorOutputPort(BasicVector(1),
+                                          self._DoCalcHandSetpointOutput)
+        self.knife_setpoint_output_port = \
+            self._DeclareVectorOutputPort(BasicVector(1),
+                                          self._DoCalcKnifeSetpointOutput)
+
+        self._DeclarePeriodicPublish(0.01, 0.0)
+
+    def _DoCalcDiscreteVariableUpdates(self, context, events, discrete_state):
+        # Call base method to ensure we do not get recursion.
+        LeafSystem._DoCalcDiscreteVariableUpdates(
+            self, context, events, discrete_state)
+
+        state = discrete_state. \
+            get_mutable_vector().get_mutable_value()
+        if not self.initialized:
+            state[0] = self.STATE_STARTUP
+            self.initialized = True
+
+        self.current_primitive.CalcSetpointOutput(
+            context, self.kuka_setpoint.get_mutable_value())
+
+
+    def _DoAllocKukaSetpointOutput(self):
+        return AbstractValue.Make(InstantaneousKukaControllerSetpoint())
+
+    def _DoCalcKukaSetpointOutput(self, context, y_data):
+        y_data.SetFrom(self.kuka_setpoint)
+
+    def _DoCalcHandSetpointOutput(self, context, y_data):
+        state = context.get_discrete_state_vector().get_value()
+        y_data.get_mutable_value()[:] = self.gripper_setpoint
+
+    def _DoCalcKnifeSetpointOutput(self, context, y_data):
+        state = context.get_discrete_state_vector().get_value()
+        y_data.get_mutable_value()[:] = self.knife_setpoint
+
+
+class ManipTaskPlanner(LeafSystem):
+    STATE_STARTUP = -1
+    STATE_TERMINATE = -2
     STATE_MOVING_TO_NOMINAL = 0
-    STATE_ATTEMPTING_FLIP = 1
-    STATE_STUCK = 2
 
     def __init__(self, rbt_full, rbt_kuka, q_nom,
-                 world_builder, hand_controller, kuka_controller,
-                 mrbv):
+                 world_builder, hand_controller,
+                 kuka_controller, mrbv):
         LeafSystem.__init__(self)
-        self.set_name("Food Flipping State Machine")
+        self.set_name("Food Flipping Task Planner")
 
-        self.end_of_plan_time_margin = 0.1
-        self.n_replan_attempts_nominal = 10
-        self.n_replan_attempts_flip = 100
-
-        self.q_nom = q_nom
-        # TODO(gizatt) Move these into state vector?
         self.q_traj = None
         self.q_traj_d = None
         self.rbt_full = rbt_full
