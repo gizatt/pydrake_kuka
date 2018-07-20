@@ -1,4 +1,5 @@
 # -*- coding: utf8 -*-
+import functools
 import math
 import numpy as np
 import random
@@ -43,6 +44,12 @@ class InstantaneousKukaControllerSetpoint():
         self.Kee_pt = Kee_pt          # 3x3 or scalar
         self.Kee_xyz = Kee_xyz      # 3x3 or scalar
         self.Kee_v = Kee_v          # 3x3 or scalar
+
+    def Copy(self, setpoint):
+        for a in dir(self):
+            if not a.startswith('__'):
+                setattr(self, a, getattr(setpoint, a))
+
 
 class InstantaneousKukaController(LeafSystem):
     def __init__(self, rbt, plant,
@@ -368,52 +375,102 @@ class GuillotineController(LeafSystem):
         y[:] = control_output[:]
 
 
-class TaskPrimitive():
-    def __init__():
-        pass
 
-    def CalcSetpointOutput(context, setpoint_object):
-        raise NotImplementedError()
+
+
+class TaskPrimitive():
+    def __init__(self):
+        ''' Functions *must* takes context, setpoint_object as their args. '''
+        self.functions = {}
+        self.guards = {}
+        self.current_function_name = ""
+
+    def CalcSetpointOutput(self, context, setpoint_object):
+        if self.current_function_name == "":
+            raise RuntimeError("TaskPrimitive initial function not initialized.")
+
+        # Check guards
+        for guard_handle, to_name in self.guards[self.current_function_name]:
+            if guard_handle(context):
+                self.current_function_name = to_name
+
+        # Run function
+        self.functions[self.current_function_name](context, setpoint_object)
 
     @staticmethod
-    def CalcExpectedCost(context):
+    def CalcExpectedCost(self, context):
         ''' Can return Infinity if using this primitive,
             given the context, is infeasible or pointless. '''
         raise NotImplementedError()
 
+    def _RegisterFunction(self, name, handle):
+        self.functions[name] = handle
+        self.guards[name] = []
 
-class IdlePrimitive():
+    def _RegisterTransition(self, from_name, to_name, guard_handle):
+        self.guards[from_name].append(guard_handle, to_name)
+
+
+def MakeKukaNominalPoseSetpoint(rbt, q_nom):
+    setpoint_object = InstantaneousKukaControllerSetpoint()
+    setpoint_object.Ka = 1.0
+    setpoint_object.Kq = 10000.
+    setpoint_object.Kv = 1000.
+
+    setpoint_object.q_des = q_nom[0:7]
+    setpoint_object.v_des = np.zeros(7)
+    return setpoint_object
+
+def RunNominalPoseTarget(context, setpoint_object, template_setpoint):
+    setpoint_object.Copy(template_setpoint)
+
+class IdlePrimitive(TaskPrimitive):
     def __init__(self, rbt, q_nom):
-        self.q_nom = q_nom
+        TaskPrimitive.__init__(self)
+
+        self.current_function_name = "move to idle"
+        self._RegisterFunction(
+            "move to idle",
+            functools.partial(RunNominalPoseTarget,
+                              template_setpoint=
+                              MakeKukaNominalPoseSetpoint(rbt, q_nom)))
+
+    @staticmethod
+    def CalcExpectedCost(self, context, rbt):
+        return 1.
+
+
+class GrabObjectPrimitive():
+    def __init__(self, rbt, q_nom, target_object_id):
         self.rbt = rbt
+        self.q_nom = q_nom
         self.nq = 7
         self.nv = 7
 
+        # Pick grasp points on the target object
+
     def CalcSetpointOutput(self, context, setpoint_object):
         setpoint_object.Ka = 1.0
-        setpoint_object.Kq = 1000000.
+        setpoint_object.Kq = 1000. # very weak, just regularizing
         setpoint_object.Kv = 1000.
-        setpoint_object.Kee_pt = 1000000.
+        setpoint_object.Kee_pt = np.diag([1000000., 1000000., 0.])
         setpoint_object.Kee_xyz = 500000.
         setpoint_object.Kee_v = 5000.
 
-        #setpoint_object.q_des = self.q_nom[0:7] + 0.1
+        setpoint_object.q_des = self.q_nom[0:7]
         setpoint_object.v_des = np.zeros(self.nv)
         setpoint_object.ee_frame = self.rbt.findFrame(
             "iiwa_frame_ee").get_frame_index()
         setpoint_object.ee_pt = np.zeros(3)
         t = context.get_time()
-        setpoint_object.ee_pt_des = np.array([0.*np.sin(t)*0.2 + 0.5,
-                                             0.*np.sin(t*2.)*0.5,
-                                             1.0])
-        setpoint_object.ee_v_des = np.array([0., 0., 0.])
+        setpoint_object.ee_pt_des = np.array([0.6, 0., 0.])
+        setpoint_object.ee_v_des = np.array([0., 0., -1.0])
         setpoint_object.ee_x_des = np.array([0., 1., 0.])
         setpoint_object.ee_y_des = np.array([0., 0., -1.])
 
     @staticmethod
     def CalcExpectedCost(context, rbt):
         return 1.
-
 
 class TaskPlanner(LeafSystem):
 
