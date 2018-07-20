@@ -385,7 +385,8 @@ class TaskPrimitive():
         self.guards = {}
         self.current_function_name = ""
 
-    def CalcSetpointOutput(self, context, setpoint_object):
+    def CalcSetpointsOutput(self, context, setpoint_object,
+                            gripper_setpoint, knife_setpoint):
         if self.current_function_name == "":
             raise RuntimeError("TaskPrimitive initial function not initialized.")
 
@@ -395,7 +396,8 @@ class TaskPrimitive():
                 self.current_function_name = to_name
 
         # Run function
-        self.functions[self.current_function_name](context, setpoint_object)
+        self.functions[self.current_function_name](
+            context, setpoint_object, gripper_setpoint, knife_setpoint)
 
     @staticmethod
     def CalcExpectedCost(self, context):
@@ -421,8 +423,12 @@ def MakeKukaNominalPoseSetpoint(rbt, q_nom):
     setpoint_object.v_des = np.zeros(7)
     return setpoint_object
 
-def RunNominalPoseTarget(context, setpoint_object, template_setpoint):
+def RunNominalPoseTarget(context, setpoint_object,
+                         gripper_setpoint, knife_setpoint,
+                         template_setpoint):
     setpoint_object.Copy(template_setpoint)
+    gripper_setpoint[:] = 0.
+    knife_setpoint[:] = np.pi/2.
 
 class IdlePrimitive(TaskPrimitive):
     def __init__(self, rbt, q_nom):
@@ -449,7 +455,7 @@ class GrabObjectPrimitive():
 
         # Pick grasp points on the target object
 
-    def CalcSetpointOutput(self, context, setpoint_object):
+    def CalcSetpointsOutput(self, context, setpoint_object, gripper_setpoint, knife_setpoint):
         setpoint_object.Ka = 1.0
         setpoint_object.Kq = 1000. # very weak, just regularizing
         setpoint_object.Kv = 1000.
@@ -467,6 +473,9 @@ class GrabObjectPrimitive():
         setpoint_object.ee_v_des = np.array([0., 0., -1.0])
         setpoint_object.ee_x_des = np.array([0., 1., 0.])
         setpoint_object.ee_y_des = np.array([0., 0., -1.])
+
+        gripper_setpoint[:] = 0.
+
 
     @staticmethod
     def CalcExpectedCost(context, rbt):
@@ -497,8 +506,10 @@ class TaskPlanner(LeafSystem):
         self.initialized = False
         self.current_primitive = IdlePrimitive(self.rbt_full, q_nom)
         self.kuka_setpoint = self._DoAllocKukaSetpointOutput()
-        self.gripper_setpoint = 0.
-        self.knife_setpoint = np.pi/2.
+        # Put these in arrays so we can more easily pass by reference into
+        # CalcSetpointsOutput
+        self.gripper_setpoint = np.array([0.])
+        self.knife_setpoint = np.array([np.pi/2.]) 
 
         # TODO The controller takes full state in, even though it only
         # controls the Kuka... that should be tidied up.
@@ -527,9 +538,9 @@ class TaskPlanner(LeafSystem):
             state[0] = self.STATE_STARTUP
             self.initialized = True
 
-        self.current_primitive.CalcSetpointOutput(
-            context, self.kuka_setpoint.get_mutable_value())
-
+        self.current_primitive.CalcSetpointsOutput(
+            context, self.kuka_setpoint.get_mutable_value(),
+            self.gripper_setpoint, self.knife_setpoint)
 
     def _DoAllocKukaSetpointOutput(self):
         return AbstractValue.Make(InstantaneousKukaControllerSetpoint())
