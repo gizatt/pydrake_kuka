@@ -192,11 +192,11 @@ class InstantaneousKukaController(LeafSystem):
             ee_p_next = ee_p + self.control_period * (ee_v + ee_v_next) / 2.
 
             if setpoint.ee_pt_des is not None:
-                ee_p_err = setpoint.ee_pt_des - ee_p_next
-                prog.AddQuadraticCost(ee_p_err.T.dot(setpoint.Kee_pt).dot(ee_p_err))
+                ee_p_err = setpoint.ee_pt_des.reshape((3, 1)) - ee_p_next.reshape((3, 1))
+                prog.AddQuadraticCost((ee_p_err.T.dot(setpoint.Kee_pt).dot(ee_p_err))[0, 0])
             if setpoint.ee_v_des is not None:
-                ee_v_err = setpoint.ee_v_des - ee_v_next
-                prog.AddQuadraticCost(ee_v_err.T.dot(setpoint.Kee_v).dot(ee_v_err))
+                ee_v_err = setpoint.ee_v_des.reshape((3, 1)) - ee_v_next.reshape((3, 1))
+                prog.AddQuadraticCost((ee_v_err.T.dot(setpoint.Kee_v).dot(ee_v_err))[0, 0])
 
             # Also compute errors in EE cardinal vector directions vs targets in world frame
             for i, vec in enumerate(
@@ -211,8 +211,8 @@ class InstantaneousKukaController(LeafSystem):
                     ee_dir_v = J_ee_dir.dot(v)
                     ee_dir_v_next = J_ee_dir.dot(v_next)
                     ee_dir_p_next = ee_dir_p + self.control_period * (ee_dir_v + ee_dir_v_next) / 2.
-                    ee_dir_p_err = vec - ee_dir_p_next
-                    prog.AddQuadraticCost(ee_dir_p_err.T.dot(setpoint.Kee_xyz).dot(ee_dir_p_err))
+                    ee_dir_p_err = vec.reshape((3, 1)) - ee_dir_p_next.reshape((3, 1))
+                    prog.AddQuadraticCost((ee_dir_p_err.T.dot(setpoint.Kee_xyz).dot(ee_dir_p_err))[0, 0])
 
 
 
@@ -375,34 +375,36 @@ class GuillotineController(LeafSystem):
         y[:] = control_output[:]
 
 
-
-
+class TaskPrimitiveContextInfo():
+    def __init__(self, t, x):
+        self.t = t
+        self.x = x
 
 class TaskPrimitive():
     def __init__(self):
-        ''' Functions *must* takes context, setpoint_object as their args. '''
+        ''' Functions *must* takes ContextInfo, setpoint_object as their args. '''
         self.functions = {}
         self.guards = {}
         self.current_function_name = ""
 
-    def CalcSetpointsOutput(self, context, setpoint_object,
+    def CalcSetpointsOutput(self, context_info, setpoint_object,
                             gripper_setpoint, knife_setpoint):
         if self.current_function_name == "":
             raise RuntimeError("TaskPrimitive initial function not initialized.")
 
         # Check guards
         for guard_handle, to_name in self.guards[self.current_function_name]:
-            if guard_handle(context):
+            if guard_handle(context_info):
                 self.current_function_name = to_name
 
         # Run function
         self.functions[self.current_function_name](
-            context, setpoint_object, gripper_setpoint, knife_setpoint)
+            context_info, setpoint_object, gripper_setpoint, knife_setpoint)
 
     @staticmethod
-    def CalcExpectedCost(self, context):
+    def CalcExpectedCost(self, context_info):
         ''' Can return Infinity if using this primitive,
-            given the context, is infeasible or pointless. '''
+            given the context info, is infeasible or pointless. '''
         raise NotImplementedError()
 
     def _RegisterFunction(self, name, handle):
@@ -410,7 +412,7 @@ class TaskPrimitive():
         self.guards[name] = []
 
     def _RegisterTransition(self, from_name, to_name, guard_handle):
-        self.guards[from_name].append(guard_handle, to_name)
+        self.guards[from_name].append((guard_handle, to_name))
 
 
 def MakeKukaNominalPoseSetpoint(rbt, q_nom):
@@ -423,7 +425,7 @@ def MakeKukaNominalPoseSetpoint(rbt, q_nom):
     setpoint_object.v_des = np.zeros(7)
     return setpoint_object
 
-def RunNominalPoseTarget(context, setpoint_object,
+def RunNominalPoseTarget(context_info, setpoint_object,
                          gripper_setpoint, knife_setpoint,
                          template_setpoint):
     setpoint_object.Copy(template_setpoint)
@@ -442,43 +444,114 @@ class IdlePrimitive(TaskPrimitive):
                               MakeKukaNominalPoseSetpoint(rbt, q_nom)))
 
     @staticmethod
-    def CalcExpectedCost(self, context, rbt):
+    def CalcExpectedCost(self, context_info, rbt):
         return 1.
 
 
-class GrabObjectPrimitive():
+class GrabObjectPrimitive(TaskPrimitive):
     def __init__(self, rbt, q_nom, target_object_id):
+        TaskPrimitive.__init__(self)
+
         self.rbt = rbt
         self.q_nom = q_nom
-        self.nq = 7
-        self.nv = 7
-
-        # Pick grasp points on the target object
-
-    def CalcSetpointsOutput(self, context, setpoint_object, gripper_setpoint, knife_setpoint):
-        setpoint_object.Ka = 1.0
-        setpoint_object.Kq = 1000. # very weak, just regularizing
-        setpoint_object.Kv = 1000.
-        setpoint_object.Kee_pt = np.diag([1000000., 1000000., 0.])
-        setpoint_object.Kee_xyz = 500000.
-        setpoint_object.Kee_v = 5000.
-
-        setpoint_object.q_des = self.q_nom[0:7]
-        setpoint_object.v_des = np.zeros(self.nv)
-        setpoint_object.ee_frame = self.rbt.findFrame(
+        self.target_object_id = target_object_id
+        self.ee_frame = self.rbt.findFrame(
             "iiwa_frame_ee").get_frame_index()
-        setpoint_object.ee_pt = np.zeros(3)
-        t = context.get_time()
-        setpoint_object.ee_pt_des = np.array([0.6, 0., 0.])
-        setpoint_object.ee_v_des = np.array([0., 0., -1.0])
-        setpoint_object.ee_x_des = np.array([0., 1., 0.])
-        setpoint_object.ee_y_des = np.array([0., 0., -1.])
+        self.current_function_name = "move over object"
+        self._RegisterFunction(
+            "move over object",
+            self.RunMoveOverObject)
+        self._RegisterTransition("move over object", "move down to object",
+                                 self.IsGripperOverObject)
 
-        gripper_setpoint[:] = 0.
+        self._RegisterFunction(
+            "move down to object",
+            self.RunMoveToObject)
+        self._RegisterTransition("move down to object", "grasp object",
+                                 self.IsObjectInsideGripper)
+        self._RegisterTransition("move down to object", "move over object",
+                                 self.IsGripperNotOverObject)
 
+        self._RegisterFunction(
+            "grasp object",
+            self.RunGraspObject)
+        self._RegisterTransition("grasp object", "move down to object",
+                                 self.IsObjectNotInsideGripper)
+
+
+        self.base_setpoint = InstantaneousKukaControllerSetpoint()
+        self.base_setpoint.Ka = 1.0
+        self.base_setpoint.Kq = 1000. # very weak, just regularizing
+        self.base_setpoint.Kv = 1000.
+        self.base_setpoint.Kee_v = 5000.
+        self.base_setpoint.q_des = self.q_nom[0:7]
+        self.base_setpoint.v_des = np.zeros(7)
+        self.base_setpoint.ee_frame = self.ee_frame
+        self.base_setpoint.ee_pt = np.array([0., 0.03, 0.])
+        self.base_setpoint.ee_v_des = np.array([0., 0., 0.0])
+
+    def RunMoveOverObject(self, context_info, setpoint_object,
+                         gripper_setpoint, knife_setpoint):
+        setpoint_object.Copy(self.base_setpoint)
+        setpoint_object.Kee_pt = 1000000.
+        setpoint_object.Kee_xyz = 500000.
+        
+        kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
+        object_centroid_world = self.rbt.transformPoints(
+            kinsol, np.zeros(3), self.target_object_id, 0)
+        setpoint_object.ee_pt_des = object_centroid_world + np.array([[0., 0., 0.2]]).T
+        setpoint_object.ee_x_des = np.array([1., 0., 0.])
+        setpoint_object.ee_y_des = np.array([0., -1, -1.]) # facing down
+
+        gripper_setpoint[:] = 0.5
+        knife_setpoint[:] = np.pi/2.
+
+    def RunMoveToObject(self, context_info, setpoint_object,
+                        gripper_setpoint, knife_setpoint):
+        setpoint_object.Copy(self.base_setpoint)
+        setpoint_object.Kee_pt = 1000000.
+        setpoint_object.Kee_xyz = 500000.
+        
+        kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
+        object_centroid_world = self.rbt.transformPoints(
+            kinsol, np.zeros(3), self.target_object_id, 0)
+        setpoint_object.ee_pt_des = object_centroid_world + np.array([[0., 0., 0.0]]).T
+        setpoint_object.ee_x_des = np.array([1., 0., 0.])
+        setpoint_object.ee_y_des = np.array([0., -1, -1.]) # facing down
+
+        gripper_setpoint[:] = 0.5
+        knife_setpoint[:] = np.pi/2.
+
+    def RunGraspObject(self, context_info, setpoint_object,
+                        gripper_setpoint, knife_setpoint):
+        self.RunMoveToObject(context_info, setpoint_object, gripper_setpoint, knife_setpoint)
+        gripper_setpoint[:] = 0.0
+
+    def IsGripperOverObject(self, context_info):
+        kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
+        tf = self.rbt.relativeTransform(kinsol, self.target_object_id, self.ee_frame)
+        translation = tf[0:3, 3]
+        print "current TF: ", translation, np.linalg.norm(translation)
+        return np.linalg.norm(translation[0:2]) <= 0.2 and translation[2] >= 0.05
+
+    def IsGripperNotOverObject(self, context_info):
+        kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
+        tf = self.rbt.relativeTransform(kinsol, self.target_object_id, self.ee_frame)
+        translation = tf[0:3, 3]
+        return np.linalg.norm(translation[0:2]) >= 0.2
+
+    def IsObjectInsideGripper(self, context_info):
+        kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
+        tf = self.rbt.relativeTransform(kinsol, self.target_object_id, self.ee_frame)
+        translation = tf[0:3, 3]
+        print "current TF: ", translation, np.linalg.norm(translation)
+        return np.linalg.norm(translation) < 0.05
+
+    def IsObjectNotInsideGripper(self, context_info):
+        return not self.IsObjectInsideGripper(context_info)
 
     @staticmethod
-    def CalcExpectedCost(context, rbt):
+    def CalcExpectedCost(context_info, rbt):
         return 1.
 
 class TaskPlanner(LeafSystem):
@@ -500,11 +573,11 @@ class TaskPlanner(LeafSystem):
                                    self.nq_full + self.nv_full)
 
         self._DeclareDiscreteState(1)
-        self._DeclarePeriodicDiscreteUpdate(period_sec=0.01)
+        self._DeclarePeriodicDiscreteUpdate(period_sec=0.1)
         # TODO set default state somehow better. Requires new
         # bindings to override AllocateDiscreteState or something else.
         self.initialized = False
-        self.current_primitive = IdlePrimitive(self.rbt_full, q_nom)
+        self.current_primitive = GrabObjectPrimitive(self.rbt_full, q_nom, self.rbt_full.FindBody("mesh_cyl_0").get_body_index())
         self.kuka_setpoint = self._DoAllocKukaSetpointOutput()
         # Put these in arrays so we can more easily pass by reference into
         # CalcSetpointsOutput
@@ -538,8 +611,13 @@ class TaskPlanner(LeafSystem):
             state[0] = self.STATE_STARTUP
             self.initialized = True
 
+        t = context.get_time()
+        x_robot_full = self.EvalVectorInput(
+            context, self.robot_state_input_port.get_index()).get_value()
+
+        context_info = TaskPrimitiveContextInfo(t, x_robot_full)
         self.current_primitive.CalcSetpointsOutput(
-            context, self.kuka_setpoint.get_mutable_value(),
+            context_info, self.kuka_setpoint.get_mutable_value(),
             self.gripper_setpoint, self.knife_setpoint)
 
     def _DoAllocKukaSetpointOutput(self):
