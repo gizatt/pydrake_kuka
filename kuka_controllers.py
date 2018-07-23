@@ -194,7 +194,6 @@ class InstantaneousKukaController(LeafSystem):
             ee_p_next = ee_p + self.control_period * (ee_v + ee_v_next) / 2.
 
             if setpoint.ee_pt_des is not None:
-                print "ee desired pos: ", setpoint.ee_pt_des
                 ee_p_err = setpoint.ee_pt_des.reshape((3, 1)) - ee_p_next.reshape((3, 1))
                 prog.AddQuadraticCost((ee_p_err.T.dot(setpoint.Kee_pt).dot(ee_p_err))[0, 0])
             if setpoint.ee_v_des is not None:
@@ -475,7 +474,6 @@ class CutPrimitive(TaskPrimitive):
         self.ee_frame = self.rbt.findFrame(
             "iiwa_frame_ee").get_frame_index()
         self.base_setpoint = MakeKukaNominalPoseSetpoint(rbt, q_nom)
-        print "MADE BASE SETPOINT", self.base_setpoint.ee_pt_des
 
     def MoveIdle(self, context_info, setpoint_object,
                  gripper_setpoint, knife_setpoint):
@@ -546,7 +544,6 @@ class MoveObjectPrimitive(TaskPrimitive):
 
         self.target_location = target_location
         self.object_pt = self.rbt.get_body(self.target_object_id).get_center_of_mass()
-        print "Using Object COM ", self.object_pt
 
         self.base_setpoint = InstantaneousKukaControllerSetpoint()
         self.base_setpoint.Ka = 0.001
@@ -562,7 +559,6 @@ class MoveObjectPrimitive(TaskPrimitive):
 
     def RunMoveOverObject(self, context_info, setpoint_object,
                          gripper_setpoint, knife_setpoint):
-        print "RunMoveOverObject"
         setpoint_object.Copy(self.base_setpoint)
         setpoint_object.Kee_pt = 1000000.
         setpoint_object.Kee_xyz = 500000.
@@ -583,7 +579,6 @@ class MoveObjectPrimitive(TaskPrimitive):
 
     def RunMoveToObject(self, context_info, setpoint_object,
                         gripper_setpoint, knife_setpoint):
-        print "RunMoveToObject"
         setpoint_object.Copy(self.base_setpoint)
         setpoint_object.Kee_pt = 1000000.
         setpoint_object.Kee_xyz = 500000.
@@ -604,7 +599,6 @@ class MoveObjectPrimitive(TaskPrimitive):
 
     def RunGraspObject(self, context_info, setpoint_object,
                         gripper_setpoint, knife_setpoint):
-        print "RunGraspObject"
         setpoint_object.Copy(self.base_setpoint)
         setpoint_object.Kee_pt = 1000000.
         setpoint_object.Kee_xyz = 500000.
@@ -626,7 +620,6 @@ class MoveObjectPrimitive(TaskPrimitive):
 
     def RunMoveWithObject(self, context_info, setpoint_object,
                           gripper_setpoint, knife_setpoint):
-        print "RunMovewithObject"
         setpoint_object.Copy(self.base_setpoint)
         setpoint_object.Kee_pt = 1000000.
         setpoint_object.Kee_xyz = 500000.
@@ -636,7 +629,6 @@ class MoveObjectPrimitive(TaskPrimitive):
             kinsol, self.object_pt, self.target_object_id, 0)
         # why is 3x1 + 3, a 3x3??????
         err = self.target_location.reshape((3, 1)) - object_centroid_world.reshape((3, 1))
-        print "current err: ", err
         curr_ee_location = self.rbt.transformPoints(
             kinsol, self.base_setpoint.ee_pt, self.ee_frame, 0)
         offset = np.zeros((3, 1))
@@ -656,7 +648,6 @@ class MoveObjectPrimitive(TaskPrimitive):
         pt_ee = self.rbt.transformPoints(kinsol, self.base_setpoint.ee_pt, self.ee_frame, 0)
         pt_obj = self.rbt.transformPoints(kinsol, self.object_pt, self.target_object_id, 0)
         translation = pt_ee - pt_obj
-        print "current TF: ", translation, np.linalg.norm(translation[0:2])
         return np.linalg.norm(translation[0:2]) <= 0.1 and translation[2] >= 0.1
 
     def IsGripperNotOverObject(self, context_info):
@@ -671,7 +662,6 @@ class MoveObjectPrimitive(TaskPrimitive):
         pt_ee = self.rbt.transformPoints(kinsol, self.base_setpoint.ee_pt, self.ee_frame, 0)
         pt_obj = self.rbt.transformPoints(kinsol, self.object_pt, self.target_object_id, 0)
         translation = pt_ee - pt_obj
-        print "current TF: ", translation, np.linalg.norm(translation[0:2])
         return np.linalg.norm(translation) < 0.03
 
     def IsObjectNotInsideGripper(self, context_info):
@@ -690,7 +680,6 @@ class MoveObjectPrimitive(TaskPrimitive):
         finger_closedness = finger_state[1] - finger_state[0]
         finger_speed = context_info.x[self.rbt.get_num_positions() + 8] - \
                        context_info.x[self.rbt.get_num_positions() + 7]
-        print "finger states: ", finger_state, finger_speed
         if finger_closedness < 0.5 and finger_closedness > 0.01:
             return True
         else:

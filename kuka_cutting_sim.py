@@ -1,6 +1,7 @@
 # -*- coding: utf8 -*-
 
 import argparse
+from copy import deepcopy
 import random
 import time
 import os
@@ -12,6 +13,7 @@ import pydrake
 from pydrake.all import (
     CompliantMaterial,
     DiagramBuilder,
+    PiecewisePolynomial,
     RigidBodyFrame,
     RigidBodyPlant,
     RigidBodyTree,
@@ -71,6 +73,12 @@ if __name__ == "__main__":
     rbt, rbt_just_kuka, q0 = world_builder.setup_initial_world(
         n_objects = args.n_objects)
     x = np.zeros(rbt.get_num_positions() + rbt.get_num_velocities())
+
+    # Record the history of sim in a set of (state_log, rbt) slices
+    # so that we can reconstruct / animate it at the end.
+    sim_slices = []
+
+
     x[0:q0.shape[0]] = q0
     t = 0
     clear_vis = True
@@ -201,6 +209,7 @@ if __name__ == "__main__":
 
         # This kicks off simulation. Most of the run time will be spent
         # in this call.
+        rbt_new = None
         try:
             simulator.StepTo(args.duration)
         except cutting_utils.CutException as e:
@@ -208,23 +217,33 @@ if __name__ == "__main__":
             print "Handling cut event at time %f" % t
             x = simulator.get_mutable_context().\
                 get_mutable_continuous_state_vector().CopyToVector()[0:x.shape[0]]
-            rbt, x = world_builder.do_cut(
+            rbt_new, x = world_builder.do_cut(
                 rbt, x, cut_body_index=e.cut_body_index, 
                 cut_pt=e.cut_pt, cut_normal=e.cut_normal)
-            continue
         except StopIteration:
             print "Terminated early"
-        break
+
+        sim_slices.append((rbt, PiecewisePolynomial.FirstOrderHold(
+                            state_log.sample_times()[1:], # First knot is repeated
+                            state_log.data()[:, 1:])))
+        if rbt_new:
+            rbt = rbt_new
+        else:
+            break
 
     print("Final state: ", state.CopyToVector())
     end_time = simulator.get_mutable_context().get_time()
 
     if args.animate_forever:
         try:
-            while(1):
-                mrbv.animate(state_log, time_scaling=0.1)
+            while (1):
+                mrbv = MeshcatRigidBodyVisualizer(sim_slices[0][0], draw_timestep=0.01, clear_vis=True)
+                time.sleep(1.0)
+                for rbt, traj in sim_slices:
+                    mrbv = MeshcatRigidBodyVisualizer(rbt, draw_timestep=0.01, clear_vis=False)
+                    mrbv.animate(traj, time_scaling=1.0)
         except Exception as e:
-            print "Fail ", e
+            print "Exception during visualization: ", e
 
     if meshcat_server_p is not None:
         meshcat_server_p.kill()
