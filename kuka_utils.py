@@ -80,12 +80,13 @@ def visualize_plan_with_meshcat(rbt, pbrv, qtraj, sample_time=0.05):
 
 
 class ExperimentWorldBuilder():
-    def __init__(self):
+    def __init__(self, with_knife=True):
         self.table_top_z_in_world = 0.736 + 0.057 / 2
         self.manipuland_body_indices = []
         self.manipuland_params = []
         self.tabletop_indices = []
         self.guillotine_blade_index = None
+        self.with_knife = with_knife
         self.model_index_dict = {}
         r, p, y = 2.4, 1.9, 3.8
         self.magic_rpy_offset = np.array([r, p, y])
@@ -117,7 +118,10 @@ class ExperimentWorldBuilder():
         q0_kuka_seed = rbt_just_kuka.getZeroConfiguration()
         # "Center low" from IIWA stored_poses.json from Spartan
         # + closed hand + raised blade
-        q0_kuka_seed[0:10] = np.array([-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38, 0.0, 0.0, 1.5])
+        q0_kuka_seed[0:9] = np.array([-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38, 0.0, 0.0])
+        if self.with_knife:
+            q0_kuka_seed[9] = 1.5
+
         q0_kuka, info = kuka_ik.plan_ee_configuration(
             rbt_just_kuka, q0_kuka_seed, q0_kuka_seed, end_effector_desired, ee_body,
             ee_point, allow_collision=True, euler_limits=0.01)
@@ -126,7 +130,7 @@ class ExperimentWorldBuilder():
 
         # Add objects + make random initial poses
         q0 = np.zeros(rbt.get_num_positions() + 6*n_objects)
-        q0[0:10] = q0_kuka
+        q0[0:rbt_just_kuka.get_num_positions()] = q0_kuka
         for k in range(n_objects):
             self.add_cut_cylinder_to_tabletop(rbt, "cyl_%d" % k, cut_dirs=[], cut_points=[])
             radius = self.manipuland_params[-1]["radius"]
@@ -254,13 +258,14 @@ class ExperimentWorldBuilder():
         self.add_model_wrapper(wsg50_sdf_path, FloatingBaseType.kFixed,
             gripper_frame, rbt)
 
-        # Add guillotine
-        guillotine_frame = RigidBodyFrame(
-            "guillotine_frame", rbt.world(),
-            [0.6, -0.41, self.table_top_z_in_world], [0, 0, 0])
-        self.add_model_wrapper(guillotine_path, FloatingBaseType.kFixed,
-            guillotine_frame, rbt)
-        self.guillotine_blade_index = rbt.FindBody("blade").get_body_index()
+        if self.with_knife:
+            # Add guillotine
+            guillotine_frame = RigidBodyFrame(
+                "guillotine_frame", rbt.world(),
+                [0.6, -0.41, self.table_top_z_in_world], [0, 0, 0])
+            self.add_model_wrapper(guillotine_path, FloatingBaseType.kFixed,
+                guillotine_frame, rbt)
+            self.guillotine_blade_index = rbt.FindBody("blade").get_body_index()
 
 
     def add_cut_cylinder_to_tabletop(self, rbt, model_name,
