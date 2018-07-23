@@ -217,6 +217,9 @@ if __name__ == "__main__":
                 cut_pt=e.cut_pt, cut_normal=e.cut_normal)
         except StopIteration:
             print "Terminated early"
+        except RuntimeError as e:
+            print "Runtime Error: ", e
+            print "Probably NAN in simulation. Terminating early."
 
         sim_slices.append((rbt, PiecewisePolynomial.FirstOrderHold(
                             #  Discard first knot, as it's repeated

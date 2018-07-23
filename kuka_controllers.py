@@ -503,7 +503,7 @@ class CutPrimitive(TaskPrimitive):
 
 
 class MoveObjectPrimitive(TaskPrimitive):
-    def __init__(self, rbt, q_nom, target_object_id, target_location):
+    def __init__(self, rbt, q_nom, target_object_id, target_location, target_yaw):
         TaskPrimitive.__init__(self)
 
         self.rbt = rbt
@@ -543,6 +543,7 @@ class MoveObjectPrimitive(TaskPrimitive):
                                  self.IsObjectNotGripped)
 
         self.target_location = target_location
+        self.target_yaw = target_yaw
         self.object_pt = self.rbt.get_body(self.target_object_id).get_center_of_mass()
 
         self.base_setpoint = InstantaneousKukaControllerSetpoint()
@@ -637,7 +638,8 @@ class MoveObjectPrimitive(TaskPrimitive):
             if curr_ee_location[2] < 0.825:
                 offset[0:2] -= err[0:2]
         setpoint_object.ee_pt_des = curr_ee_location.reshape((3, 1)) + err.reshape((3, 1)) + offset
-        setpoint_object.ee_z_des = np.array([0., 1., 0.])
+        setpoint_object.ee_z_des = np.array([-np.sin(self.target_yaw),
+                                             np.cos(self.target_yaw), 0.])
         setpoint_object.ee_y_des = np.array([0., 0., -1.]) # facing down
 
         gripper_setpoint[:] = 0.0
@@ -768,48 +770,60 @@ class TaskPlanner(LeafSystem):
             # Currently cutting
             pass
         elif self.current_target_object is None:
-            # Search over objects to find one to clear
-            best_clear_object = None
-            best_clear_dist = 100000.
-            objects_on_table = []
-            n_clear_objects = 0
+            # Search over objects, collating:
+            # 1) Whether they're in the knife zone already
+            # 2) What their z axis size is
+
+            on_table_inds = []
+            on_table_heights = []
+            under_blade_inds = []
+            under_blade_distances = []
             end_effector_pos = self.rbt.transformPoints(
-                kinsol, np.zeros(3), 
+                kinsol, np.zeros(3),
                 self.rbt.findFrame("iiwa_frame_ee").get_frame_index(), 0)
             for body_i in self.world_builder.manipuland_body_indices:
                 current_object_pos = self.rbt.transformPoints(
                     kinsol, self.rbt.get_body(body_i).get_center_of_mass(), body_i, 0)
                 if np.all(current_object_pos.T >= np.array([0.4, -0.6, 0.6])) and \
                    np.all(current_object_pos.T <= np.array([0.9, 0.6, 0.9])):
-                    objects_on_table.append(body_i)
+                    on_table_inds.append(body_i)
                 if np.all(current_object_pos.T >= np.array([0.4, -0.6, 0.6])) and \
                    np.all(current_object_pos.T <= np.array([0.7, 0.0, 0.9])):
-                    dist = np.linalg.norm(end_effector_pos - current_object_pos)
-                    n_clear_objects += 1
-                    if dist < best_clear_dist:
-                        best_clear_dist = dist
-                        best_clear_object = body_i
+                    under_blade_inds.append(body_i)
+                    under_blade_distances.append(np.linalg.norm(end_effector_pos - current_object_pos))
+                # Get body points
+                pts = self.rbt.get_body(body_i).get_visual_elements()[0].getGeometry().getPoints()
+                on_table_heights.append(np.max(pts[2, :]) - np.min(pts[2, :]))
 
-            if n_clear_objects > 1:  # If exactly 1 object, cut it!
-                print "CLEARING OBJECT %d" % best_clear_object
-                self.current_target_object_move_location = np.array([0.5+np.random.random()*0.2, 0.2, 0.825])
-                self.current_target_object = best_clear_object
+            n_clear_objects = len(under_blade_inds)
+
+            # What do we *want* to cut?
+            desired_cut_ind = on_table_inds[np.argmax(on_table_heights)]
+
+            # If it's under the blade, keep it there and move everything else
+            # out of the way.
+            cut_location = np.array([0.6, -0.2, 0.775])
+            clear_location = np.array([0.5+np.random.random()*0.2, 0.2, 0.825])
+            if (desired_cut_ind in under_blade_inds and n_clear_objects == 1) or \
+               (n_clear_objects == 0):
+                # Cut the object!
+                self.current_target_object_move_location = cut_location
+                self.current_target_object = desired_cut_ind
+                print "MOVING OBJECT %d FOR CUT" % self.current_target_object
+                self.do_cut_after_current_move = True
+            elif n_clear_objects > 0:
+                # Clear an object at random
+                self.current_target_object = random.choice(under_blade_inds)
+                while self.current_target_object == desired_cut_ind:
+                    self.current_target_object = random.choice(under_blade_inds)
+                print "CLEARING OBJECT %d" % self.current_target_object
+                self.current_target_object_move_location = clear_location
                 self.do_cut_after_current_move = False
-            elif n_clear_objects == 1:
-                self.current_target_object_move_location = np.array([0.6, -0.2, 0.775])
-                self.current_target_object = best_clear_object
-                print "MOVING OBJECT %d FOR CUT" % self.current_target_object
-                self.do_cut_after_current_move = True
-            else:
-                # Instead pick a random object that's on the table
-                self.current_target_object_move_location = np.array([0.6, -0.2, 0.775])
-                self.current_target_object = random.choice(objects_on_table)
-                print "MOVING OBJECT %d FOR CUT" % self.current_target_object
-                self.do_cut_after_current_move = True
 
             self.current_primitive = MoveObjectPrimitive(
-                self.rbt, self.q_nom, 
-                self.current_target_object, self.current_target_object_move_location)
+                self.rbt, self.q_nom,
+                self.current_target_object, self.current_target_object_move_location,
+                target_yaw=np.pi/2.)
         else:
             # Check that object location against current move goal
             current_object_pos = self.rbt.transformPoints(
