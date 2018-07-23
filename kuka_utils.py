@@ -264,7 +264,7 @@ class ExperimentWorldBuilder():
             [0.0, 0, self.table_top_z_in_world], [0, 0, 0])
         self.add_model_wrapper(iiwa_urdf_path, FloatingBaseType.kFixed,
                                robot_base_frame, rbt)
-        
+
         # Add gripper
         gripper_frame = rbt.findFrame("iiwa_frame_ee")
         self.add_model_wrapper(wsg50_sdf_path, FloatingBaseType.kFixed,
