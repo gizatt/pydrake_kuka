@@ -772,6 +772,7 @@ class TaskPlanner(LeafSystem):
             best_clear_object = None
             best_clear_dist = 100000.
             objects_on_table = []
+            n_clear_objects = 0
             end_effector_pos = self.rbt.transformPoints(
                 kinsol, np.zeros(3), 
                 self.rbt.findFrame("iiwa_frame_ee").get_frame_index(), 0)
@@ -780,19 +781,25 @@ class TaskPlanner(LeafSystem):
                     kinsol, self.rbt.get_body(body_i).get_center_of_mass(), body_i, 0)
                 if np.all(current_object_pos.T >= np.array([0.4, -0.6, 0.6])) and \
                    np.all(current_object_pos.T <= np.array([0.9, 0.6, 0.9])):
-                   objects_on_table.append(body_i)
+                    objects_on_table.append(body_i)
                 if np.all(current_object_pos.T >= np.array([0.4, -0.6, 0.6])) and \
                    np.all(current_object_pos.T <= np.array([0.7, 0.0, 0.9])):
                     dist = np.linalg.norm(end_effector_pos - current_object_pos)
+                    n_clear_objects += 1
                     if dist < best_clear_dist:
                         best_clear_dist = dist
                         best_clear_object = body_i
 
-            if best_clear_object is not None:
+            if n_clear_objects > 1:  # If exactly 1 object, cut it!
                 print "CLEARING OBJECT %d" % best_clear_object
                 self.current_target_object_move_location = np.array([0.5+np.random.random()*0.2, 0.2, 0.825])
                 self.current_target_object = best_clear_object
                 self.do_cut_after_current_move = False
+            elif n_clear_objects == 1:
+                self.current_target_object_move_location = np.array([0.6, -0.2, 0.775])
+                self.current_target_object = best_clear_object
+                print "MOVING OBJECT %d FOR CUT" % self.current_target_object
+                self.do_cut_after_current_move = True
             else:
                 # Instead pick a random object that's on the table
                 self.current_target_object_move_location = np.array([0.6, -0.2, 0.775])
