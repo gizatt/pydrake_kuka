@@ -123,7 +123,7 @@ if __name__ == "__main__":
         # Create a high-level state machine to guide the robot
         # motion...
         task_planner = builder.AddSystem(
-            kuka_controllers.TaskPlanner(rbt, q0))
+            kuka_controllers.TaskPlanner(rbt, q0, world_builder))
         builder.Connect(rbplant_sys.state_output_port(),
                         task_planner.robot_state_input_port)
         builder.Connect(task_planner.hand_setpoint_output_port,

@@ -128,17 +128,17 @@ class ExperimentWorldBuilder():
         q0 = np.zeros(rbt.get_num_positions() + 6*n_objects)
         q0[0:10] = q0_kuka
         for k in range(n_objects):
-            self.add_cut_cylinder_to_tabletop(rbt, "cyl_%d" % k)
+            self.add_cut_cylinder_to_tabletop(rbt, "cyl_%d" % k, cut_dirs=[], cut_points=[])
             radius = self.manipuland_params[-1]["radius"]
             new_body = rbt.get_body(self.manipuland_body_indices[-1])
 
             # Remember to reverse effects of self.magic_rpy_offset
             new_pos = self.magic_rpy_rotmat.T.dot(np.array(
-                        [0.6, # 0.4 + np.random.random()*0.2,
-                         -0.2, #-0.2 + np.random.random()*0.4,
+                        [0.4 + np.random.random()*0.2,
+                         -0.2 + np.random.random()*0.4,
                          self.table_top_z_in_world+radius+0.001]))
 
-            new_rot = 0*(np.random.random(3) * np.pi * 2.) - self.magic_rpy_offset
+            new_rot = (np.random.random(3) * np.pi * 2.) - self.magic_rpy_offset
             q0[range(new_body.get_position_start_index(),
                      new_body.get_position_start_index()+6)] = np.hstack([new_pos, new_rot])
         rbt.compile()
@@ -269,7 +269,7 @@ class ExperimentWorldBuilder():
         import mesh_creation
         import trimesh
         # Determine parameters of the cylinders
-        height = height or np.random.random() * 0.03 + 0.04
+        height = height or np.random.random() * 0.05 + 0.1
         radius = radius or np.random.random() * 0.02 + 0.01
         if cut_dirs is None:
             cut_dirs = [np.array([1., 0., 0.])]
@@ -279,7 +279,7 @@ class ExperimentWorldBuilder():
         print "Cutting with cutting planes ", cutting_planes
         # Create a mesh programmatically for that cylinder
         cyl = mesh_creation.create_cut_cylinder(
-            radius, height, cutting_planes, sections=20)
+            radius, height, cutting_planes, sections=6)
         cyl.density = 1000.  # Same as water
         
         self.manipuland_params.append(dict(

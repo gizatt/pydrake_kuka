@@ -1,5 +1,6 @@
 # -*- coding: utf8 -*-
 import functools
+from copy import deepcopy
 import math
 import numpy as np
 import random
@@ -28,7 +29,7 @@ class InstantaneousKukaControllerSetpoint():
         self, ee_pt_des=None, ee_v_des=None, ee_frame=None, 
         ee_pt=None, ee_x_des=None, ee_y_des=None, ee_z_des=None,
         q_des=None, v_des=None, Kq=0., Kv=0., Ka=0., Kee_pt=0.,
-        Kee_xyz=0., Kee_v=0.):
+        Kee_xyz=0., Kee_xyzd=0., Kee_v=0.):
         self.ee_frame = ee_frame    # frame id
         self.ee_pt = ee_pt          # 3x1, pt in ee frame
         self.ee_pt_des = ee_pt_des    # 3x1, world frame
@@ -43,17 +44,18 @@ class InstantaneousKukaControllerSetpoint():
         self.Ka = Ka                # nv x nv or scalar
         self.Kee_pt = Kee_pt          # 3x3 or scalar
         self.Kee_xyz = Kee_xyz      # 3x3 or scalar
+        self.Kee_xyzd = Kee_xyzd      # 3x3 or scalar
         self.Kee_v = Kee_v          # 3x3 or scalar
 
     def Copy(self, setpoint):
         for a in dir(self):
-            if not a.startswith('__'):
-                setattr(self, a, getattr(setpoint, a))
+            if not a.startswith('__') and a is not "Copy":
+                setattr(self, a, deepcopy(getattr(setpoint, a)))
 
 
 class InstantaneousKukaController(LeafSystem):
     def __init__(self, rbt, plant,
-                 control_period=0.05,
+                 control_period=0.033,
                  print_period=0.5):
         LeafSystem.__init__(self)
         self.set_name("Instantaneous Kuka Controller")
@@ -192,6 +194,7 @@ class InstantaneousKukaController(LeafSystem):
             ee_p_next = ee_p + self.control_period * (ee_v + ee_v_next) / 2.
 
             if setpoint.ee_pt_des is not None:
+                print "ee desired pos: ", setpoint.ee_pt_des
                 ee_p_err = setpoint.ee_pt_des.reshape((3, 1)) - ee_p_next.reshape((3, 1))
                 prog.AddQuadraticCost((ee_p_err.T.dot(setpoint.Kee_pt).dot(ee_p_err))[0, 0])
             if setpoint.ee_v_des is not None:
@@ -213,6 +216,7 @@ class InstantaneousKukaController(LeafSystem):
                     ee_dir_p_next = ee_dir_p + self.control_period * (ee_dir_v + ee_dir_v_next) / 2.
                     ee_dir_p_err = vec.reshape((3, 1)) - ee_dir_p_next.reshape((3, 1))
                     prog.AddQuadraticCost((ee_dir_p_err.T.dot(setpoint.Kee_xyz).dot(ee_dir_p_err))[0, 0])
+                    prog.AddQuadraticCost((ee_dir_v_next.T.dot(setpoint.Kee_xyzd).dot(ee_dir_v_next)))
 
 
 
@@ -247,7 +251,7 @@ class HandController(LeafSystem):
             "right_finger_sliding_joint"
         ]
 
-        self.max_force = 100.  # gripper max closing / opening force
+        self.max_force = 50.  # gripper max closing / opening force
 
         self.controlled_inds, _ = kuka_utils.extract_position_indices(
             rbt, self.controlled_joint_names)
@@ -418,8 +422,8 @@ class TaskPrimitive():
 def MakeKukaNominalPoseSetpoint(rbt, q_nom):
     setpoint_object = InstantaneousKukaControllerSetpoint()
     setpoint_object.Ka = 1.0
-    setpoint_object.Kq = 10000.
-    setpoint_object.Kv = 1000.
+    setpoint_object.Kq = 1000000.
+    setpoint_object.Kv = 10000.
 
     setpoint_object.q_des = q_nom[0:7]
     setpoint_object.v_des = np.zeros(7)
@@ -429,7 +433,7 @@ def RunNominalPoseTarget(context_info, setpoint_object,
                          gripper_setpoint, knife_setpoint,
                          template_setpoint):
     setpoint_object.Copy(template_setpoint)
-    gripper_setpoint[:] = 0.
+    gripper_setpoint[:] = 0.5
     knife_setpoint[:] = np.pi/2.
 
 class IdlePrimitive(TaskPrimitive):
@@ -448,8 +452,60 @@ class IdlePrimitive(TaskPrimitive):
         return 1.
 
 
-class GrabObjectPrimitive(TaskPrimitive):
-    def __init__(self, rbt, q_nom, target_object_id):
+class CutPrimitive(TaskPrimitive):
+    def __init__(self, rbt, q_nom):
+        TaskPrimitive.__init__(self)
+        self.rbt = rbt
+        self.current_function_name = "clear hand from blade"
+        self._RegisterFunction(
+            "clear hand from blade",
+            self.MoveIdle)
+        self._RegisterTransition("clear hand from blade", "cut while moving to idle",
+                                 self.IsHandClearOfBlade)
+        self._RegisterFunction(
+            "cut while moving to idle",
+            self.MoveIdleAndChop)
+        self._RegisterTransition("cut while moving to idle", "done",
+                                 self.DoYouHearThePeopleSingle)
+
+        self._RegisterFunction(
+            "done",
+            self.MoveIdle)
+
+        self.ee_frame = self.rbt.findFrame(
+            "iiwa_frame_ee").get_frame_index()
+        self.base_setpoint = MakeKukaNominalPoseSetpoint(rbt, q_nom)
+        print "MADE BASE SETPOINT", self.base_setpoint.ee_pt_des
+
+    def MoveIdle(self, context_info, setpoint_object,
+                 gripper_setpoint, knife_setpoint):
+        setpoint_object.Copy(self.base_setpoint)
+        gripper_setpoint[:] = 0.5
+        knife_setpoint[:] = np.pi/2.
+
+    def MoveIdleAndChop(self, context_info, setpoint_object,
+                 gripper_setpoint, knife_setpoint):
+        setpoint_object.Copy(self.base_setpoint)
+        gripper_setpoint[:] = 0.5
+        knife_setpoint[:] = 0.
+
+    def IsHandClearOfBlade(self, context_info):
+        kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
+        pt = self.rbt.transformPoints(kinsol, np.zeros(3), self.ee_frame, 0)
+        if pt[1] >= -0.05 or pt[2] >= 1.2:
+            return True
+
+    def DoYouHearThePeopleSingle(self, context_info):
+        # that is, has the guillotine blade fallen
+        return context_info.x[9] < 0.05
+
+    @staticmethod
+    def CalcExpectedCost(self, context_info, rbt):
+        return 1.
+
+
+class MoveObjectPrimitive(TaskPrimitive):
+    def __init__(self, rbt, q_nom, target_object_id, target_location):
         TaskPrimitive.__init__(self)
 
         self.rbt = rbt
@@ -477,78 +533,171 @@ class GrabObjectPrimitive(TaskPrimitive):
             self.RunGraspObject)
         self._RegisterTransition("grasp object", "move down to object",
                                  self.IsObjectNotInsideGripper)
+        self._RegisterTransition("grasp object", "move object",
+                                 self.IsObjectGripped)
 
+        self._RegisterFunction(
+            "move object",
+            self.RunMoveWithObject)
+        self._RegisterTransition("move object", "move down to object",
+                                 self.IsObjectNotInsideGripper)
+        self._RegisterTransition("move object", "move down to object",
+                                 self.IsObjectNotGripped)
+
+        self.target_location = target_location
+        self.object_pt = self.rbt.get_body(self.target_object_id).get_center_of_mass()
+        print "Using Object COM ", self.object_pt
 
         self.base_setpoint = InstantaneousKukaControllerSetpoint()
-        self.base_setpoint.Ka = 1.0
-        self.base_setpoint.Kq = 1000. # very weak, just regularizing
-        self.base_setpoint.Kv = 1000.
-        self.base_setpoint.Kee_v = 5000.
+        self.base_setpoint.Ka = 0.001
+        self.base_setpoint.Kq = 0. # very weak, just regularizing
+        self.base_setpoint.Kv = 10
+        self.base_setpoint.Kee_v = 2000
+        self.base_setpoint.Kee_xyzd = 2000.
         self.base_setpoint.q_des = self.q_nom[0:7]
         self.base_setpoint.v_des = np.zeros(7)
         self.base_setpoint.ee_frame = self.ee_frame
-        self.base_setpoint.ee_pt = np.array([0., 0.03, 0.])
+        self.base_setpoint.ee_pt = np.array([0., 0.045, 0.00])
         self.base_setpoint.ee_v_des = np.array([0., 0., 0.0])
 
     def RunMoveOverObject(self, context_info, setpoint_object,
                          gripper_setpoint, knife_setpoint):
+        print "RunMoveOverObject"
         setpoint_object.Copy(self.base_setpoint)
         setpoint_object.Kee_pt = 1000000.
         setpoint_object.Kee_xyz = 500000.
         
         kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
         object_centroid_world = self.rbt.transformPoints(
-            kinsol, np.zeros(3), self.target_object_id, 0)
-        setpoint_object.ee_pt_des = object_centroid_world + np.array([[0., 0., 0.2]]).T
-        setpoint_object.ee_x_des = np.array([1., 0., 0.])
-        setpoint_object.ee_y_des = np.array([0., -1, -1.]) # facing down
+            kinsol, self.object_pt, self.target_object_id, 0)
+        object_px_world = self.rbt.transformPoints(
+            kinsol, self.object_pt + np.array([0., 0., 1.]), self.target_object_id, 0)
+        setpoint_object.ee_pt_des = object_centroid_world + np.array([[0., 0., 0.1]]).T
+        y = context_info.x[self.rbt.get_body(self.target_object_id)
+                                    .get_position_start_index()+5]
+        setpoint_object.ee_z_des = object_px_world - object_centroid_world
+        setpoint_object.ee_y_des = np.array([0., 0., -1.]) # facing down
 
         gripper_setpoint[:] = 0.5
         knife_setpoint[:] = np.pi/2.
 
     def RunMoveToObject(self, context_info, setpoint_object,
                         gripper_setpoint, knife_setpoint):
+        print "RunMoveToObject"
         setpoint_object.Copy(self.base_setpoint)
         setpoint_object.Kee_pt = 1000000.
         setpoint_object.Kee_xyz = 500000.
-        
         kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
         object_centroid_world = self.rbt.transformPoints(
-            kinsol, np.zeros(3), self.target_object_id, 0)
-        setpoint_object.ee_pt_des = object_centroid_world + np.array([[0., 0., 0.0]]).T
-        setpoint_object.ee_x_des = np.array([1., 0., 0.])
-        setpoint_object.ee_y_des = np.array([0., -1, -1.]) # facing down
+            kinsol, self.object_pt, self.target_object_id, 0)
+        object_px_world = self.rbt.transformPoints(
+            kinsol, self.object_pt + np.array([0., 0., 1.]), self.target_object_id, 0)
+        setpoint_object.ee_pt_des = object_centroid_world + np.array([[0., 0., 0.]]).T
+        y = context_info.x[self.rbt.get_body(self.target_object_id)
+                                    .get_position_start_index()+5]
+        setpoint_object.ee_z_des = object_px_world - object_centroid_world
+        setpoint_object.ee_y_des = np.array([0., 0., -1.]) # facing down
 
         gripper_setpoint[:] = 0.5
         knife_setpoint[:] = np.pi/2.
+        self.started_gripping_time = None # Please break this into a state or react to gripper force...
 
     def RunGraspObject(self, context_info, setpoint_object,
                         gripper_setpoint, knife_setpoint):
-        self.RunMoveToObject(context_info, setpoint_object, gripper_setpoint, knife_setpoint)
+        print "RunGraspObject"
+        setpoint_object.Copy(self.base_setpoint)
+        setpoint_object.Kee_pt = 1000000.
+        setpoint_object.Kee_xyz = 500000.
+        kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
+        object_centroid_world = self.rbt.transformPoints(
+            kinsol, self.object_pt, self.target_object_id, 0)
+        object_px_world = self.rbt.transformPoints(
+            kinsol, self.object_pt + np.array([0., 0., 1.]), self.target_object_id, 0)
+        setpoint_object.ee_pt_des = object_centroid_world + np.array([[0., 0., 0.]]).T
+        y = context_info.x[self.rbt.get_body(self.target_object_id)
+                                    .get_position_start_index()+5]
+        setpoint_object.ee_z_des = object_px_world - object_centroid_world
+        setpoint_object.ee_y_des = np.array([0., 0., -1.]) # facing down
+
+        knife_setpoint[:] = np.pi/2.
         gripper_setpoint[:] = 0.0
+        if self.started_gripping_time == None:
+            self.started_gripping_time = context_info.t
+
+    def RunMoveWithObject(self, context_info, setpoint_object,
+                          gripper_setpoint, knife_setpoint):
+        print "RunMovewithObject"
+        setpoint_object.Copy(self.base_setpoint)
+        setpoint_object.Kee_pt = 1000000.
+        setpoint_object.Kee_xyz = 500000.
+
+        kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
+        object_centroid_world = self.rbt.transformPoints(
+            kinsol, self.object_pt, self.target_object_id, 0)
+        # why is 3x1 + 3, a 3x3??????
+        err = self.target_location.reshape((3, 1)) - object_centroid_world.reshape((3, 1))
+        print "current err: ", err
+        curr_ee_location = self.rbt.transformPoints(
+            kinsol, self.base_setpoint.ee_pt, self.ee_frame, 0)
+        offset = np.zeros((3, 1))
+        if np.linalg.norm(err) > 0.2:
+            offset[2] = 0.2 # up and over, I should really separate this into a new state
+            if curr_ee_location[2] < 0.825:
+                offset[0:2] -= err[0:2]
+        setpoint_object.ee_pt_des = curr_ee_location.reshape((3, 1)) + err.reshape((3, 1)) + offset
+        setpoint_object.ee_z_des = np.array([0., 1., 0.])
+        setpoint_object.ee_y_des = np.array([0., 0., -1.]) # facing down
+
+        gripper_setpoint[:] = 0.0
+        knife_setpoint[:] = np.pi/2.
 
     def IsGripperOverObject(self, context_info):
         kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
-        tf = self.rbt.relativeTransform(kinsol, self.target_object_id, self.ee_frame)
-        translation = tf[0:3, 3]
-        print "current TF: ", translation, np.linalg.norm(translation)
-        return np.linalg.norm(translation[0:2]) <= 0.2 and translation[2] >= 0.05
+        pt_ee = self.rbt.transformPoints(kinsol, self.base_setpoint.ee_pt, self.ee_frame, 0)
+        pt_obj = self.rbt.transformPoints(kinsol, self.object_pt, self.target_object_id, 0)
+        translation = pt_ee - pt_obj
+        print "current TF: ", translation, np.linalg.norm(translation[0:2])
+        return np.linalg.norm(translation[0:2]) <= 0.1 and translation[2] >= 0.1
 
     def IsGripperNotOverObject(self, context_info):
         kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
-        tf = self.rbt.relativeTransform(kinsol, self.target_object_id, self.ee_frame)
-        translation = tf[0:3, 3]
-        return np.linalg.norm(translation[0:2]) >= 0.2
+        pt_ee = self.rbt.transformPoints(kinsol, self.base_setpoint.ee_pt, self.ee_frame, 0)
+        pt_obj = self.rbt.transformPoints(kinsol, self.object_pt, self.target_object_id, 0)
+        translation = pt_ee - pt_obj
+        return np.linalg.norm(translation[0:2]) >= 0.1
 
     def IsObjectInsideGripper(self, context_info):
         kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
-        tf = self.rbt.relativeTransform(kinsol, self.target_object_id, self.ee_frame)
-        translation = tf[0:3, 3]
-        print "current TF: ", translation, np.linalg.norm(translation)
-        return np.linalg.norm(translation) < 0.05
+        pt_ee = self.rbt.transformPoints(kinsol, self.base_setpoint.ee_pt, self.ee_frame, 0)
+        pt_obj = self.rbt.transformPoints(kinsol, self.object_pt, self.target_object_id, 0)
+        translation = pt_ee - pt_obj
+        print "current TF: ", translation, np.linalg.norm(translation[0:2])
+        return np.linalg.norm(translation) < 0.03
 
     def IsObjectNotInsideGripper(self, context_info):
         return not self.IsObjectInsideGripper(context_info)
+
+    def IsObjectGripped(self, context_info):
+        if self.IsObjectNotInsideGripper(context_info):
+            return False
+        if self.started_gripping_time is None or \
+            (context_info.t - self.started_gripping_time) < 0.25:
+            return False
+        # Check finger closed state -- should be
+        # mostly closed but not complete closed
+        # TODO(gizatt) switch to gripper force
+        finger_state = context_info.x[7:9]
+        finger_closedness = finger_state[1] - finger_state[0]
+        finger_speed = context_info.x[self.rbt.get_num_positions() + 8] - \
+                       context_info.x[self.rbt.get_num_positions() + 7]
+        print "finger states: ", finger_state, finger_speed
+        if finger_closedness < 0.5 and finger_closedness > 0.01:
+            return True
+        else:
+            return False
+
+    def IsObjectNotGripped(self, context_info):
+        return not self.IsObjectGripped(context_info)
 
     @staticmethod
     def CalcExpectedCost(context_info, rbt):
@@ -556,14 +705,16 @@ class GrabObjectPrimitive(TaskPrimitive):
 
 class TaskPlanner(LeafSystem):
 
-    STATE_STARTUP = -1
+    STATE_CLEARING_KNIFE_AREA = 1
+    STATE_CUTTING_OBJECT = 2
 
-    def __init__(self, rbt_full, q_nom):
+    def __init__(self, rbt_full, q_nom, world_builder):
         LeafSystem.__init__(self)
         self.set_name("Task Planner")
 
-        self.rbt_full = rbt_full
-        self.q_nom = q_nom
+        self.rbt = rbt_full
+        self.world_builder = world_builder
+        self.q_nom = np.array([-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38, 0.0, 0.0, 1.5])
         self.nq_full = rbt_full.get_num_positions()
         self.nv_full = rbt_full.get_num_velocities()
         self.nu_full = rbt_full.get_num_actuators()
@@ -577,7 +728,7 @@ class TaskPlanner(LeafSystem):
         # TODO set default state somehow better. Requires new
         # bindings to override AllocateDiscreteState or something else.
         self.initialized = False
-        self.current_primitive = GrabObjectPrimitive(self.rbt_full, q_nom, self.rbt_full.FindBody("mesh_cyl_0").get_body_index())
+        self.current_primitive = IdlePrimitive(self.rbt, q_nom)
         self.kuka_setpoint = self._DoAllocKukaSetpointOutput()
         # Put these in arrays so we can more easily pass by reference into
         # CalcSetpointsOutput
@@ -600,6 +751,11 @@ class TaskPlanner(LeafSystem):
 
         self._DeclarePeriodicPublish(0.01, 0.0)
 
+        # Really stupid simple state
+        self.current_target_object = None
+        self.current_target_object_move_location = None
+        self.do_cut_after_current_move = False
+
     def _DoCalcDiscreteVariableUpdates(self, context, events, discrete_state):
         # Call base method to ensure we do not get recursion.
         LeafSystem._DoCalcDiscreteVariableUpdates(
@@ -608,13 +764,90 @@ class TaskPlanner(LeafSystem):
         state = discrete_state. \
             get_mutable_vector().get_mutable_value()
         if not self.initialized:
-            state[0] = self.STATE_STARTUP
+            state[0] = self.STATE_CLEARING_KNIFE_AREA
             self.initialized = True
 
         t = context.get_time()
         x_robot_full = self.EvalVectorInput(
             context, self.robot_state_input_port.get_index()).get_value()
 
+        kinsol = self.rbt.doKinematics(x_robot_full[0:self.rbt.get_num_positions()])
+
+        # Legendary spaghetti starts here
+        if (isinstance(self.current_primitive, CutPrimitive) and
+            self.current_primitive.current_function_name != "done"):
+            # Currently cutting
+            pass
+        elif self.current_target_object is None:
+            # Search over objects to find one to clear
+            best_clear_object = None
+            best_clear_dist = 100000.
+            objects_on_table = []
+            end_effector_pos = self.rbt.transformPoints(
+                kinsol, np.zeros(3), 
+                self.rbt.findFrame("iiwa_frame_ee").get_frame_index(), 0)
+            for body_i in self.world_builder.manipuland_body_indices:
+                current_object_pos = self.rbt.transformPoints(
+                    kinsol, self.rbt.get_body(body_i).get_center_of_mass(), body_i, 0)
+                if np.all(current_object_pos.T >= np.array([0.4, -0.6, 0.6])) and \
+                   np.all(current_object_pos.T <= np.array([0.9, 0.6, 0.9])):
+                   objects_on_table.append(body_i)
+                if np.all(current_object_pos.T >= np.array([0.4, -0.6, 0.6])) and \
+                   np.all(current_object_pos.T <= np.array([0.7, 0.0, 0.9])):
+                    dist = np.linalg.norm(end_effector_pos - current_object_pos)
+                    if dist < best_clear_dist:
+                        best_clear_dist = dist
+                        best_clear_object = body_i
+
+            if best_clear_object is not None:
+                print "CLEARING OBJECT %d" % best_clear_object
+                self.current_target_object_move_location = np.array([0.5+np.random.random()*0.2, 0.2, 0.825])
+                self.current_target_object = best_clear_object
+                self.do_cut_after_current_move = False
+            else:
+                # Instead pick a random object that's on the table
+                self.current_target_object_move_location = np.array([0.6, -0.2, 0.775])
+                self.current_target_object = random.choice(objects_on_table)
+                print "MOVING OBJECT %d FOR CUT" % self.current_target_object
+                self.do_cut_after_current_move = True
+
+            self.current_primitive = MoveObjectPrimitive(
+                self.rbt, self.q_nom, 
+                self.current_target_object, self.current_target_object_move_location)
+        else:
+            # Check that object location against current move goal
+            current_object_pos = self.rbt.transformPoints(
+                kinsol, self.rbt.get_body(self.current_target_object).get_center_of_mass(),
+                self.current_target_object, 0)
+            # Bail if we're really really lost
+            if np.linalg.norm(current_object_pos.T - self.current_target_object_move_location) > 2.0 \
+               or current_object_pos[2] < 0.5:
+                print "BAILING"
+                self.current_target_object = None
+                self.current_target_object_move_location = None
+                self.current_primitive = IdlePrimitive(self.rbt, self.q_nom)
+                self.do_cut_after_current_move = False
+            # Don't mode switch if we're currently moving super fast
+            if np.max(np.abs(x_robot_full[self.nq_full:][0:7])) >= 0.25:
+                # TODO switch this to
+                pass
+            elif self.do_cut_after_current_move:
+                # Check that the COM of the object is close to the blade line
+                if np.abs(current_object_pos[0] - 0.6) < 0.02 and current_object_pos[1] < -0.1:
+                    print "EXECUTING CUT"
+                    self.current_target_object = None
+                    self.current_target_object_move_location = None
+                    self.current_primitive = CutPrimitive(self.rbt, self.q_nom)
+                    self.do_cut_after_current_move = False
+            else:
+                # Check that its' out of the blade area
+                if np.any(current_object_pos.T <= np.array([0.4, -0.6, 0.6])) or \
+                   np.any(current_object_pos.T >= np.array([0.7, 0.0, 0.9])):
+                    print "EXECUTING IDLE AFTER CLEAR"
+                    self.current_target_object = None
+                    self.current_target_object_move_location = None
+                    self.current_primitive = IdlePrimitive(self.rbt, self.q_nom)
+                
         context_info = TaskPrimitiveContextInfo(t, x_robot_full)
         self.current_primitive.CalcSetpointsOutput(
             context_info, self.kuka_setpoint.get_mutable_value(),
@@ -633,279 +866,3 @@ class TaskPlanner(LeafSystem):
     def _DoCalcKnifeSetpointOutput(self, context, y_data):
         state = context.get_discrete_state_vector().get_value()
         y_data.get_mutable_value()[:] = self.knife_setpoint
-
-
-class ManipTaskPlanner(LeafSystem):
-    STATE_STARTUP = -1
-    STATE_TERMINATE = -2
-    STATE_MOVING_TO_NOMINAL = 0
-
-    def __init__(self, rbt_full, rbt_kuka, q_nom,
-                 world_builder, hand_controller,
-                 kuka_controller, mrbv):
-        LeafSystem.__init__(self)
-        self.set_name("Food Flipping Task Planner")
-
-        self.q_traj = None
-        self.q_traj_d = None
-        self.rbt_full = rbt_full
-        self.rbt_kuka = rbt_kuka
-        self.nq_full = rbt_full.get_num_positions()
-        self.nq_kuka = rbt_kuka.get_num_positions()
-        self.world_builder = world_builder
-        self.hand_controller = hand_controller
-        self.kuka_controller = kuka_controller
-        self.mrbv = mrbv #MeshcatRigidBodyVisualizer(rbt_kuka, prefix="planviz")
-    
-        self.robot_state_input_port = \
-            self._DeclareInputPort(PortDataType.kVectorValued,
-                                   rbt_full.get_num_positions() +
-                                   rbt_full.get_num_velocities())
-
-        self._DeclareDiscreteState(1)
-        self._DeclarePeriodicDiscreteUpdate(period_sec=0.01)
-        # TODO set default state somehow better. Requires new
-        # bindings to override AllocateDiscreteState or something else.
-        self.initialized = False
-
-        # TODO The controller takes full state in, even though it only
-        # controls the Kuka... that should be tidied up.
-        self.kuka_setpoint_output_port = \
-            self._DeclareVectorOutputPort(
-                BasicVector(rbt_full.get_num_positions() +
-                            rbt_full.get_num_velocities()),
-                self._DoCalcKukaSetpointOutput)
-        self.hand_setpoint_output_port = \
-            self._DeclareVectorOutputPort(BasicVector(1),
-                                          self._DoCalcHandSetpointOutput)
-
-        self._DeclarePeriodicPublish(0.01, 0.0)
-
-    def _PlanToNominal(self, q0, start_time):
-        print "Searching for trajectory to get to nominal pose."
-        success = False
-        for k in range(self.n_replan_attempts_nominal):
-            qtraj, info = kuka_ik.plan_trajectory_to_posture(
-                self.rbt_full, q0, self.q_nom, 10, 1.0, start_time)
-            if info not in [1, 3, 100]:
-                print "Got error code, trying again."
-                continue
-
-            if kuka_utils.is_trajectory_collision_free(self.rbt_full, qtraj):
-                success = True
-                break
-            else:
-                print "Got a good error code, but trajectory was not " \
-                      "collision-free. Trying again."
-        if success:
-            self.q_traj = qtraj
-            self.q_traj_d = qtraj.derivative(1)
-        return success
-
-    def _PlanFlip(self, q0, start_time):
-        # Pick an object
-        print "Searching for trajectory to pick an object."
-        success = False
-
-        kinsol = self.rbt_full.doKinematics(q0)
-
-        # Build set of flippable objects
-        dirs = np.zeros((3, 4))
-        dirs[:, 0] = [-1., 0., 0.]  # in direction of cut on cylinder
-        dirs[:, 1] = [0., 1., 0.]  # in other non-axial direction of cylinder
-        dirs[:, 2] = [0., 0., 1.]  # in other non-axial direction of cylinder
-        dirs[:, 3] = [0., 0., 0.]  # origin
-        # tuples of (reach pose, touch pose, flip pose)
-        possible_flips = []
-        for body_i in self.world_builder.manipuland_body_indices:
-            # The -x dir in body frame is the cut dir, and it needs
-            # to point up
-            dirs_world = self.rbt_full.transformPoints(kinsol, dirs, body_i, 0)
-            if dirs_world[2, 0] > dirs_world[2, 3] + 0.1:
-                z = self.world_builder.table_top_z_in_world + 0.005
-                dirs_world[2, 3] = z
-                # touch moves along this direction in the world (xy)
-                touch_dir = dirs_world[0:3, 3] - dirs_world[0:3, 1]
-                touch_dir[2] = 0.
-                if np.linalg.norm(touch_dir) == 0.:
-                    touch_dir = dirs_world[0:3, 3] - dirs_world[0:3, 2]
-                    touch_dir[2] = 0.
-                touch_dir /= np.linalg.norm(touch_dir)
-
-                # Try attacking in a couple of directions
-                for t in np.linspace(-0.2, 0.2, 3):
-                    rotation = np.array([[np.cos(t), -np.sin(t)],
-                                         [np.sin(t), np.cos(t)]])
-                    new_touch_dir = np.zeros(3)
-                    new_touch_dir[0:2] = rotation.dot(touch_dir[0:2])
-                    new_touch_dir[2] = touch_dir[2]
-                    touch_yaw = math.atan2(new_touch_dir[1], new_touch_dir[0])
-                    for m in [-1., 1.]:
-                        for k in range(5):
-                            rpy = [-np.pi/2., 0., m*touch_yaw]
-
-                            touch_pose = np.hstack([dirs_world[:, 3], rpy])
-                            reach_pose = np.hstack([dirs_world[:, 3] + new_touch_dir*m*0.1, rpy])
-                            flip_pose = np.hstack([dirs_world[:, 3] - new_touch_dir*m*0.1, rpy])
-                            flip_pose += [0., 0., 0.1, 0., 0., 0.]
-                            possible_flips.append((reach_pose, touch_pose, flip_pose))
-
-        if len(possible_flips) == 0:
-            print "No possible flips! Done!"
-            return False
-        random.shuffle(possible_flips)
-
-        collision_inds = []
-        collision_inds += self.world_builder.manipuland_body_indices
-        collision_inds.append(self.rbt_full.FindBody(
-            "base", model_name="guillotine").get_body_index())
-        collision_inds.append(self.rbt_full.FindBody(
-            "blade", model_name="guillotine").get_body_index())
-        collision_inds.append(self.rbt_full.FindBody("right_finger").get_body_index())
-        collision_inds.append(self.rbt_full.FindBody("left_finger").get_body_index())
-        for k in range(self.rbt_full.get_num_bodies()):
-            if self.rbt_full.get_body(k).get_name() == "link":
-                collision_inds.append(k)
-        ee_body=self.rbt_full.FindBody("right_finger").get_body_index()
-        ee_point=[0.0, 0.03, 0.0]  # approximately fingertip
-        for goals in possible_flips:
-            q_reach, info = kuka_ik.plan_ee_configuration(
-                self.rbt_full, q0, q0, ee_pose=goals[0], 
-                ee_body=ee_body, ee_point=ee_point,
-                allow_collision=False,
-                active_bodies_idx=collision_inds)
-            print "reach: ", info
-            self.mrbv.draw(q_reach)
-            time.sleep(0.)
-            if info not in [1, 3, 100]:
-                continue
-            q_touch, info = kuka_ik.plan_ee_configuration(
-                self.rbt_full, q_reach, q_reach, ee_pose=goals[1], 
-                ee_body=ee_body, ee_point=ee_point,
-                allow_collision=True,
-                active_bodies_idx=collision_inds)
-            print "touch: ", info
-            self.mrbv.draw(q_touch)
-            time.sleep(0.)
-            if info not in [1, 3, 100]:
-                continue
-            q_flip, info = kuka_ik.plan_ee_configuration(
-                self.rbt_full, q_touch, q_reach, ee_pose=goals[2], 
-                ee_body=ee_body, ee_point=ee_point,
-                allow_collision=False,
-                active_bodies_idx=collision_inds)
-            print "flip: ", info
-            self.mrbv.draw(q_flip)
-            time.sleep(0.)
-            if info not in [1, 3, 100]:
-                continue
-
-            # If that checked out, make a real trajectory to hit all of those
-            # points
-            ts = np.array([0., 0.5, 1.0, 1.5])
-            traj_seed = PiecewisePolynomial.Pchip(
-                ts + start_time, np.vstack([q0, q_reach, q_touch, q_flip]).T, True)
-            q_traj = traj_seed
-            #needs more stable ik engine
-            ##kuka_utils.visualize_plan_with_meshcat(self.rbt_kuka, self.mrbv, traj_seed)
-            #q_traj, info, knots = kuka_ik.plan_ee_trajectory(
-            #    self.rbt_full, q0, traj_seed,
-            #    ee_times=ts[1:], ee_poses=goals,
-            #    ee_body=ee_body, ee_point=ee_point,
-            #    n_knots = 20,
-            #    start_time = start_time,
-            #    avoid_collision_tspans=[[ts[0], ts[1]]],
-            #    active_bodies_idx=collision_inds)
-            #for knot in knots:
-            #    self.mrbv.draw(knot)
-            #    time.sleep(0.25)
-            # kuka_utils.visualize_plan_with_meshcat(self.rbt_kuka, self.mrbv, q_traj)
-
-            if kuka_utils.is_trajectory_collision_free(self.rbt_full, q_traj):
-                success = True
-                break
-            else:
-                print "Got a good error code, but trajectory was not " \
-                      "collision-free. Trying again."
-
-        if success:
-            self.q_traj = q_traj
-            self.q_traj_d = q_traj.derivative(1)
-        return success
-
-    def _DoCalcDiscreteVariableUpdates(self, context, events, discrete_state):
-        # Call base method to ensure we do not get recursion.
-        LeafSystem._DoCalcDiscreteVariableUpdates(
-            self, context, events, discrete_state)
-
-        state = discrete_state. \
-            get_mutable_vector().get_mutable_value()
-        if not self.initialized:
-            state[0] = self.STATE_STARTUP
-            self.initialized = True
-
-        t = context.get_time()
-        x_robot_full = self.EvalVectorInput(
-            context, self.robot_state_input_port.get_index()).get_value()
-        q_robot_full = x_robot_full[0:self.nq_full]
-        if self.q_traj:
-            terminated = \
-                t >= self.q_traj.end_time() + self.end_of_plan_time_margin
-        else:
-            terminated = True
-
-        if state[0] == self.STATE_STARTUP or \
-           (state[0] == self.STATE_ATTEMPTING_FLIP and terminated):
-            if self._PlanToNominal(q_robot_full, t):
-                state[0] = self.STATE_MOVING_TO_NOMINAL
-                print "State machine moving to nominal"
-            else:
-                state[0] = self.STATE_STUCK
-                self.q_traj = None
-                self.q_traj_d = None
-                print "State machine stuck"
-        elif state[0] == self.STATE_MOVING_TO_NOMINAL and terminated:
-            if self._PlanFlip(q_robot_full, t):
-                state[0] = self.STATE_ATTEMPTING_FLIP
-                print "State machine attempting flip"
-            else:
-                state[0] = self.STATE_STUCK
-                self.q_traj = None
-                self.q_traj_d = None
-                print "State machine stuck"
-
-        if state[0] == self.STATE_STUCK:
-            state[0] = self.STATE_STARTUP
-            #raise StopIteration
-
-    def _DoCalcKukaSetpointOutput(self, context, y_data):
-        t = context.get_time()
-        if self.q_traj:
-            target_q = self.q_traj.value(t)[
-                self.kuka_controller.controlled_inds, 0]
-            target_v = self.q_traj_d.value(t)[
-                self.kuka_controller.controlled_inds, 0]
-            if t >= self.q_traj.end_time():
-                target_v *= 0.
-        else:
-            x = self.EvalVectorInput(
-                context, self.robot_state_input_port.get_index()).get_value()
-            target_q = x[0:self.nq_kuka]
-            target_v = target_q*0.
-
-        kuka_setpoint = y_data.get_mutable_value()
-        nq_plan = target_q.shape[0]
-        kuka_setpoint[:nq_plan] = target_q[:]
-        kuka_setpoint[self.nq_full:(self.nq_full+nq_plan)] = target_v[:]
-
-    def _DoCalcHandSetpointOutput(self, context, y_data):
-        state = context.get_discrete_state_vector().get_value()
-        y = y_data.get_mutable_value()
-        # Get the ith finger control output
-        #if self.q_traj:
-        #    q_hand = self.q_traj.value(context.get_time())[
-        #        self.hand_controller.controlled_inds, 0]
-        #    y[:] = q_hand[1] - q_hand[0]
-        #else:
-        #    y[:] = 0.
-        y[:] = 0.
