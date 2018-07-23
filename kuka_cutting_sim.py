@@ -24,9 +24,6 @@ from pydrake.all import (
     Simulator,
 )
 
-from underactuated.meshcat_rigid_body_visualizer import (
-    MeshcatRigidBodyVisualizer)
-
 import kuka_controllers
 import kuka_ik
 import kuka_utils
@@ -51,7 +48,7 @@ if __name__ == "__main__":
                         help="RNG seed")
     parser.add_argument("--animate_forever",
                         action="store_true",
-                        help="Animates the completed sim in meshcat repeatedly.")
+                        help="Animates the completed sim in meshcat on loop.")
 
     args = parser.parse_args()
     int_seed = int(args.seed*1000. % 2**32)
@@ -71,20 +68,20 @@ if __name__ == "__main__":
     world_builder = kuka_utils.ExperimentWorldBuilder()
 
     rbt, rbt_just_kuka, q0 = world_builder.setup_initial_world(
-        n_objects = args.n_objects)
+        n_objects=args.n_objects)
     x = np.zeros(rbt.get_num_positions() + rbt.get_num_velocities())
 
     # Record the history of sim in a set of (state_log, rbt) slices
     # so that we can reconstruct / animate it at the end.
     sim_slices = []
 
-
     x[0:q0.shape[0]] = q0
     t = 0
-    clear_vis = True
+    mrbv = None
     while 1:
-        mrbv = MeshcatRigidBodyVisualizer(rbt, draw_timestep=0.01, clear_vis=clear_vis)
-        clear_vis = False
+        mrbv = kuka_utils.ReinitializableMeshcatRigidBodyVisualizer(
+                rbt, draw_timestep=0.01, old_mrbv=mrbv,
+                clear_vis=(mrbv is None))
         # (wait while the visualizer warms up and loads in the models)
         mrbv.draw(x)
 
@@ -151,12 +148,12 @@ if __name__ == "__main__":
                 min_cut_force=10.,
                 cuttable_body_indices=world_builder.manipuland_body_indices,
                 timestep=0.001,
-                last_cut_time = t))
+                last_cut_time=t))
         builder.Connect(rbplant_sys.state_output_port(),
                         cutting_guard.state_input_port)
         builder.Connect(rbplant_sys.contact_results_output_port(),
                         cutting_guard.contact_results_input_port)
-        
+
         # Hook up loggers for the robot state, the robot setpoints,
         # and the torque inputs.
         def log_output(output_port, rate):
@@ -165,8 +162,6 @@ if __name__ == "__main__":
             builder.Connect(output_port, logger.get_input_port(0))
             return logger
         state_log = log_output(rbplant_sys.get_output_port(0), 60.)
-        #setpoint_log = log_output(
-        #    task_planner.kuka_setpoint_output_port, 60.)
         kuka_control_log = log_output(
             kuka_controller.get_output_port(0), 60.)
 
@@ -185,7 +180,6 @@ if __name__ == "__main__":
         # Simulator time steps will be very small, so don't
         # force the rest of the system to update every single time.
         simulator.set_publish_every_time_step(False)
-
 
         # From iiwa_wsg_simulation.cc:
         # When using the default RK3 integrator, the simulation stops
@@ -216,17 +210,21 @@ if __name__ == "__main__":
             t = simulator.get_mutable_context().get_time()
             print "Handling cut event at time %f" % t
             x = simulator.get_mutable_context().\
-                get_mutable_continuous_state_vector().CopyToVector()[0:x.shape[0]]
+                get_mutable_continuous_state_vector().CopyToVector()[
+                0:x.shape[0]]
             rbt_new, x = world_builder.do_cut(
-                rbt, x, cut_body_index=e.cut_body_index, 
+                rbt, x, cut_body_index=e.cut_body_index,
                 cut_pt=e.cut_pt, cut_normal=e.cut_normal)
         except StopIteration:
             print "Terminated early"
 
         sim_slices.append((rbt, PiecewisePolynomial.FirstOrderHold(
-                            state_log.sample_times()[1:], # First knot is repeated
+                            #  Discard first knot, as it's repeated
+                            state_log.sample_times()[1:],
                             state_log.data()[:, 1:])))
         if rbt_new:
+            # don't clone rbt_new into rbt!
+            rbt = None
             rbt = rbt_new
         else:
             break
@@ -237,10 +235,13 @@ if __name__ == "__main__":
     if args.animate_forever:
         try:
             while (1):
-                mrbv = MeshcatRigidBodyVisualizer(sim_slices[0][0], draw_timestep=0.01, clear_vis=True)
+                mrbv = kuka_utils.ReinitializableMeshcatRigidBodyVisualizer(
+                    sim_slices[0][0], draw_timestep=0.01, clear_vis=True)
                 time.sleep(1.0)
                 for rbt, traj in sim_slices:
-                    mrbv = MeshcatRigidBodyVisualizer(rbt, draw_timestep=0.01, clear_vis=False)
+                    mrbv = kuka_utils.\
+                        ReinitializableMeshcatRigidBodyVisualizer(
+                            rbt, old_mrbv=mrbv, draw_timestep=0.01)
                     mrbv.animate(traj, time_scaling=1.0)
         except Exception as e:
             print "Exception during visualization: ", e

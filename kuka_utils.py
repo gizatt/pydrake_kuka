@@ -1,9 +1,11 @@
 # -*- coding: utf8 -*-
 
 from copy import deepcopy
+import datetime
 import os.path
 from matplotlib import cm
 import numpy as np
+import re
 import subprocess
 import time
 
@@ -19,7 +21,8 @@ from pydrake.all import (
     RigidBodyFrame,
     RigidBodyTree,
     RollPitchYaw,
-    RotationMatrix
+    RotationMatrix,
+    Shape
 )
 from pydrake.solvers import ik
 
@@ -133,7 +136,7 @@ class ExperimentWorldBuilder():
         q0 = np.zeros(rbt.get_num_positions() + 6*n_objects)
         q0[0:rbt_just_kuka.get_num_positions()] = q0_kuka
         for k in range(n_objects):
-            self.add_cut_cylinder_to_tabletop(rbt, "cyl_%d" % k,
+            self.add_cut_cylinder_to_tabletop(rbt,
                                               cut_dirs=[], cut_points=[])
             radius = self.manipuland_params[-1]["radius"]
             new_body = rbt.get_body(self.manipuland_body_indices[-1])
@@ -188,7 +191,7 @@ class ExperimentWorldBuilder():
                 for sign in [-1., 1.]:
                     try:
                         self.add_cut_cylinder_to_tabletop(
-                            new_rbt, "cyl_%d" % k,
+                            new_rbt,
                             height=p["height"],
                             radius=p["radius"],
                             cut_dirs=p["cut_dirs"] + [cut_normal*sign],
@@ -206,7 +209,7 @@ class ExperimentWorldBuilder():
                               new_rbt.get_num_positions()))
             else:
                 self.add_cut_cylinder_to_tabletop(
-                    new_rbt, "cyl_%d" % k,
+                    new_rbt,
                     height=p["height"],
                     radius=p["radius"],
                     cut_dirs=p["cut_dirs"],
@@ -281,8 +284,11 @@ class ExperimentWorldBuilder():
                 rbt.FindBody("blade").get_body_index()
 
     def add_cut_cylinder_to_tabletop(
-            self, rbt, model_name, do_convex_decomp=False, height=None,
+            self, rbt, model_name=None, do_convex_decomp=False, height=None,
             radius=None, cut_dirs=None, cut_points=None):
+        if model_name is None:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%m%S%f")
+            model_name = "cyl_" + timestamp
         import mesh_creation
         import trimesh
         # Determine parameters of the cylinders
@@ -313,18 +319,18 @@ class ExperimentWorldBuilder():
             self.magic_rpy_offset)
 
         if do_convex_decomp:  # more powerful, does a convex decomp
-            urdf_dir = "/tmp/mesh_%s/" % model_name
+            urdf_dir = "/tmp/%s/" % model_name
             trimesh.io.urdf.export_urdf(cyl, urdf_dir)
-            urdf_path = urdf_dir + "mesh_%s.urdf" % model_name
+            urdf_path = urdf_dir + "%s.urdf" % model_name
             self.add_model_wrapper(urdf_path, FloatingBaseType.kRollPitchYaw,
                                    object_init_frame, rbt)
             self.manipuland_body_indices.append(rbt.get_num_bodies()-1)
         else:
-            sdf_dir = "/tmp/mesh_%s/" % model_name
-            file_name = "mesh_%s" % model_name
+            sdf_dir = "/tmp/%s/" % model_name
+            file_name = "%s" % model_name
             mesh_creation.export_sdf(
                 cyl, file_name, sdf_dir, color=[0.75, 0.5, 0.2, 1.])
-            sdf_path = sdf_dir + "mesh_%s.sdf" % model_name
+            sdf_path = sdf_dir + "%s.sdf" % model_name
             self.add_model_wrapper(sdf_path, FloatingBaseType.kRollPitchYaw,
                                    object_init_frame, rbt)
             self.manipuland_body_indices.append(rbt.get_num_bodies()-1)
@@ -362,6 +368,130 @@ def render_system_with_graphviz(system, output_file="system_view.gz"):
     string = system.GetGraphvizString()
     src = Source(string)
     src.render(output_file, view=False)
+
+
+class ReinitializableMeshcatRigidBodyVisualizer(MeshcatRigidBodyVisualizer):
+    def __init__(self,
+                 rbtree,
+                 old_mrbv=None,
+                 draw_timestep=0.033333,
+                 prefix="RBViz",
+                 zmq_url="tcp://127.0.0.1:6000",
+                 draw_collision=False,
+                 clear_vis=False):
+        LeafSystem.__init__(self)
+        self.set_name('meshcat_visualization')
+        self.timestep = draw_timestep
+        self._DeclarePeriodicPublish(draw_timestep, 0.0)
+        self.rbtree = rbtree
+        self.draw_collision = draw_collision
+
+        self._DeclareInputPort(PortDataType.kVectorValued,
+                               self.rbtree.get_num_positions() +
+                               self.rbtree.get_num_velocities())
+
+        # Set up meshcat
+        self.prefix = prefix
+        self.vis = meshcat.Visualizer(zmq_url=zmq_url)
+        self.old_mrbv = old_mrbv
+        # Don't both with caching logic if prefixes are different
+        if self.old_mrbv is not None and self.old_mrbv.prefix != self.prefix:
+            raise ValueError("Can't do any caching since old_mrbv has ",
+                             "different prefix than current mrbv.")
+        self.body_names = []
+        if clear_vis:
+            self.vis.delete()
+
+        # Publish the tree geometry to get the visualizer started
+        self.PublishAllGeometry()
+
+    def PublishAllGeometry(self):
+        n_bodies = self.rbtree.get_num_bodies()-1
+        all_meshcat_geometry = {}
+        for body_i in range(n_bodies):
+
+            body = self.rbtree.get_body(body_i+1)
+            # TODO(gizatt) Replace these body-unique indices
+            # with more readable body.get_model_name() or other
+            # model index information when an appropriate
+            # function gets bound in pydrake.
+            body_name = body.get_name() + ("(%d)" % body_i)
+            self.body_names.append(body_name)
+
+            if self.old_mrbv is not None and \
+                    body_name in self.old_mrbv.body_names:
+                continue
+
+            self.vis[self.prefix][body_name].delete()
+
+            if self.draw_collision:
+                draw_elements = [self.rbtree.FindCollisionElement(k)
+                                 for k in body.get_collision_element_ids()]
+            else:
+                draw_elements = body.get_visual_elements()
+
+            for element_i, element in enumerate(draw_elements):
+                element_local_tf = element.getLocalTransform()
+                if element.hasGeometry():
+                    geom = element.getGeometry()
+
+                    geom_type = geom.getShape()
+                    if geom_type == Shape.SPHERE:
+                        meshcat_geom = meshcat.geometry.Sphere(geom.radius)
+                    elif geom_type == Shape.BOX:
+                        meshcat_geom = meshcat.geometry.Box(geom.size)
+                    elif geom_type == Shape.CYLINDER:
+                        meshcat_geom = meshcat.geometry.Cylinder(
+                            geom.length, geom.radius)
+                        # In Drake, cylinders are along +z
+                        # In meshcat, cylinders are along +y
+                        # Rotate to fix this misalignment
+                        extra_rotation = tf.rotation_matrix(
+                            math.pi/2., [1, 0, 0])
+                        element_local_tf[0:3, 0:3] = \
+                            element_local_tf[0:3, 0:3].dot(
+                                extra_rotation[0:3, 0:3])
+                    elif geom_type == Shape.MESH:
+                        meshcat_geom = \
+                            meshcat.geometry.ObjMeshGeometry.from_file(
+                                geom.resolved_filename[0:-3] + "obj")
+                        # respect mesh scale
+                        element_local_tf[0:3, 0:3] *= geom.scale
+                    else:
+                        print "UNSUPPORTED GEOMETRY TYPE ",\
+                              geom.getShape(), " IGNORED"
+                        continue
+
+                    def rgba2hex(rgb):
+                        ''' Turn a list of R,G,B elements (any indexable
+                        list of >= 3 elements will work), where each element
+                        is specified on range [0., 1.], into the equivalent
+                        24-bit value 0xRRGGBB. '''
+                        val = 0
+                        for i in range(3):
+                            val += (256**(2 - i)) * int(255 * rgb[i])
+                        return val
+                    rgba = [1., 0.7, 0., 1.]
+                    if not self.draw_collision:
+                        rgba = element.getMaterial()
+
+                    #  Publish this object to the visualizer
+                    #  if we have been instructed to reset bodies
+                    #  with this name, or if the vis has no record
+                    #  of this body.
+                    self.vis[self.prefix][body_name][str(element_i)]\
+                        .set_object(meshcat_geom,
+                                    meshcat.geometry.MeshLambertMaterial(
+                                        color=rgba2hex(rgba)))
+                    self.vis[self.prefix][body_name][str(element_i)].\
+                        set_transform(element_local_tf)
+
+        # Finally, nuke any bodies that used to exist that don't exist
+        # now.
+        if self.old_mrbv is not None:
+            for body_name in self.old_mrbv.body_names:
+                if body_name not in self.body_names:
+                    self.vis[self.prefix][body_name].delete()
 
 
 class RgbdCameraMeshcatVisualizer(LeafSystem):
