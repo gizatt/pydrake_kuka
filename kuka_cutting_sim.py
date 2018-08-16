@@ -201,12 +201,14 @@ if __name__ == "__main__":
         state.SetFromVector(initial_state)
         simulator.get_mutable_context().set_time(t)
 
-        # This kicks off simulation. Most of the run time will be spent
-        # in this call.
+        # This kicks off simulation.
         rbt_new = None
         try:
             simulator.StepTo(args.duration)
         except cutting_utils.CutException as e:
+            # The Cutting Guard detected a cut event.
+            # Generate the new RBT and then continue the
+            # simulation.
             t = simulator.get_mutable_context().get_time()
             print "Handling cut event at time %f" % t
             x = simulator.get_mutable_context().\
@@ -226,7 +228,9 @@ if __name__ == "__main__":
                             state_log.sample_times()[1:],
                             state_log.data()[:, 1:])))
         if rbt_new:
-            # don't clone rbt_new into rbt!
+            # Cloning one RBT into another only sort of works;
+            # instead force rbt to become a reference to rbt_new,
+            # and let rbt get garbage collected.
             rbt = None
             rbt = rbt_new
         else:

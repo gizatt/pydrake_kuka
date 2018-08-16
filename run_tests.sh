@@ -1,5 +1,4 @@
 #! /bin/bash
-cd /test_dir
 
 # Launch a fake X-server in the background
 Xvfb :100 -ac -screen 0 800x600x24 &
