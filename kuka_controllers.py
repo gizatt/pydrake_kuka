@@ -468,7 +468,7 @@ class CutPrimitive(TaskPrimitive):
             "cut while moving to idle",
             self.MoveIdleAndChop)
         self._RegisterTransition("cut while moving to idle", "done",
-                                 self.DoYouHearThePeopleSingle)
+                                 self.DoYouHearThePeopleSing)
 
         self._RegisterFunction(
             "done",
@@ -497,7 +497,7 @@ class CutPrimitive(TaskPrimitive):
         if pt[1] >= -0.05 or pt[2] >= 1.2:
             return True
 
-    def DoYouHearThePeopleSingle(self, context_info):
+    def DoYouHearThePeopleSing(self, context_info):
         # that is, has the guillotine blade fallen
         return context_info.x[9] < 0.05
 
@@ -875,7 +875,7 @@ class TaskPlanner(LeafSystem):
                     self.current_target_object = None
                     self.current_target_object_move_location = None
                     self.current_primitive = IdlePrimitive(self.rbt, self.q_nom)
-                
+
         context_info = TaskPrimitiveContextInfo(t, x_robot_full)
         self.current_primitive.CalcSetpointsOutput(
             context_info, self.kuka_setpoint.get_mutable_value(),
