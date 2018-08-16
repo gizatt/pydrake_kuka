@@ -18,19 +18,20 @@ if __name__=="__main__":
     parser.add_argument("-p", "--passthrough", type=str, default="", help="(optional) extra string that will be tacked onto the docker run command, allows you to pass extra options. Make sure to put this in quotes and leave a space before the first character")
 
     args = parser.parse_args()
-    source_dir=os.getcwd()
+    source_dir = os.getcwd()
 
     image_name = 'pydrake_kuka'
     print("running docker container derived from image %s" % image_name)
     home_directory = '/home/' + user_name
 
     cmd = "xhost +local:root \n"
-    cmd += "nvidia-docker run "
+    cmd += "docker run "
     if args.container:
         cmd += " --name %(container_name)s " % {'container_name': args.container}
 
     cmd += " -e DISPLAY -e QT_X11_NO_MITSHM=1 -v /tmp/.X11-unix:/tmp/.X11-unix:rw "     # enable graphics
     cmd += " -v ~/.ssh:%(home_directory)s/.ssh " % {'home_directory': home_directory}   # mount ssh keys
+    cmd += " -v %(source_dir)s:/pydrake_kuka/ " % {'source_dir': source_dir}
 
     # Port for meshcat
     cmd += " -p 7000:7000 "

@@ -12,6 +12,5 @@ RUN yes | sudo /underactuated/scripts/setup/ubuntu/16.04/install_prereqs
 RUN apt install -y python-tk xvfb mesa-utils libegl1-mesa libgl1-mesa-glx libglu1-mesa libx11-6 x11-common x11-xserver-utils
 
 ENV PYTHONPATH=/underactuated/src:/opt/drake/lib/python2.7/site-packages
-COPY ./ /pydrake_kuka
 
-ENTRYPOINT bash -c "cd /pydrake_kuka && ./run_tests.sh"
+ENTRYPOINT bash
