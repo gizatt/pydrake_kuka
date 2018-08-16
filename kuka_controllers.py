@@ -428,12 +428,14 @@ def MakeKukaNominalPoseSetpoint(rbt, q_nom):
     setpoint_object.v_des = np.zeros(7)
     return setpoint_object
 
+
 def RunNominalPoseTarget(context_info, setpoint_object,
                          gripper_setpoint, knife_setpoint,
                          template_setpoint):
     setpoint_object.Copy(template_setpoint)
     gripper_setpoint[:] = 0.5
     knife_setpoint[:] = np.pi/2.
+
 
 class IdlePrimitive(TaskPrimitive):
     def __init__(self, rbt, q_nom):
@@ -443,8 +445,8 @@ class IdlePrimitive(TaskPrimitive):
         self._RegisterFunction(
             "move to idle",
             functools.partial(RunNominalPoseTarget,
-                              template_setpoint=
-                              MakeKukaNominalPoseSetpoint(rbt, q_nom)))
+                              template_setpoint=MakeKukaNominalPoseSetpoint(
+                                rbt, q_nom)))
 
     @staticmethod
     def CalcExpectedCost(self, context_info, rbt):
@@ -459,7 +461,8 @@ class CutPrimitive(TaskPrimitive):
         self._RegisterFunction(
             "clear hand from blade",
             self.MoveIdle)
-        self._RegisterTransition("clear hand from blade", "cut while moving to idle",
+        self._RegisterTransition("clear hand from blade",
+                                 "cut while moving to idle",
                                  self.IsHandClearOfBlade)
         self._RegisterFunction(
             "cut while moving to idle",
@@ -482,13 +485,14 @@ class CutPrimitive(TaskPrimitive):
         knife_setpoint[:] = np.pi/2.
 
     def MoveIdleAndChop(self, context_info, setpoint_object,
-                 gripper_setpoint, knife_setpoint):
+                        gripper_setpoint, knife_setpoint):
         setpoint_object.Copy(self.base_setpoint)
         gripper_setpoint[:] = 0.5
         knife_setpoint[:] = 0.
 
     def IsHandClearOfBlade(self, context_info):
-        kinsol = self.rbt.doKinematics(context_info.x[:self.rbt.get_num_positions()])
+        kinsol = self.rbt.doKinematics(
+            context_info.x[:self.rbt.get_num_positions()])
         pt = self.rbt.transformPoints(kinsol, np.zeros(3), self.ee_frame, 0)
         if pt[1] >= -0.05 or pt[2] >= 1.2:
             return True
@@ -559,7 +563,7 @@ class MoveObjectPrimitive(TaskPrimitive):
         self.base_setpoint.ee_v_des = np.array([0., 0., 0.0])
 
     def RunMoveOverObject(self, context_info, setpoint_object,
-                         gripper_setpoint, knife_setpoint):
+                          gripper_setpoint, knife_setpoint):
         setpoint_object.Copy(self.base_setpoint)
         setpoint_object.Kee_pt = 1000000.
         setpoint_object.Kee_xyz = 500000.
@@ -599,7 +603,7 @@ class MoveObjectPrimitive(TaskPrimitive):
         self.started_gripping_time = None # Please break this into a state or react to gripper force...
 
     def RunGraspObject(self, context_info, setpoint_object,
-                        gripper_setpoint, knife_setpoint):
+                       gripper_setpoint, knife_setpoint):
         setpoint_object.Copy(self.base_setpoint)
         setpoint_object.Kee_pt = 1000000.
         setpoint_object.Kee_xyz = 500000.
@@ -616,7 +620,7 @@ class MoveObjectPrimitive(TaskPrimitive):
 
         knife_setpoint[:] = np.pi/2.
         gripper_setpoint[:] = 0.0
-        if self.started_gripping_time == None:
+        if self.started_gripping_time is None:
             self.started_gripping_time = context_info.t
 
     def RunMoveWithObject(self, context_info, setpoint_object,
@@ -772,10 +776,10 @@ class TaskPlanner(LeafSystem):
         elif self.current_target_object is None:
             # Search over objects, collating:
             # 1) Whether they're in the knife zone already
-            # 2) What their z axis size is
+            # 2) What their max length along z axis is
 
-            on_table_inds = []
-            on_table_heights = []
+            cuttable_inds = []
+            cuttable_heights = []
             under_blade_inds = []
             under_blade_distances = []
             end_effector_pos = self.rbt.transformPoints(
@@ -786,19 +790,33 @@ class TaskPlanner(LeafSystem):
                     kinsol, self.rbt.get_body(body_i).get_center_of_mass(), body_i, 0)
                 if np.all(current_object_pos.T >= np.array([0.4, -0.6, 0.6])) and \
                    np.all(current_object_pos.T <= np.array([0.9, 0.6, 0.9])):
-                    on_table_inds.append(body_i)
-                if np.all(current_object_pos.T >= np.array([0.4, -0.6, 0.6])) and \
-                   np.all(current_object_pos.T <= np.array([0.7, 0.0, 0.9])):
-                    under_blade_inds.append(body_i)
-                    under_blade_distances.append(np.linalg.norm(end_effector_pos - current_object_pos))
-                # Get body points
-                pts = self.rbt.get_body(body_i).get_visual_elements()[0].getGeometry().getPoints()
-                on_table_heights.append(np.max(pts[2, :]) - np.min(pts[2, :]))
+                    # This object is on the table! Measure its extent...
+                    pts = self.rbt.get_body(body_i).get_visual_elements()[0].getGeometry().getPoints()
+                    height = np.max(pts[2, :]) - np.min(pts[2, :])
+                    print "Object with height %f" % height
+                    if height >= 0.04:
+                        cuttable_heights.append(height)
+                        cuttable_inds.append(body_i)
+
+                    # Whether or not it's cuttable, record if it's under
+                    # the blade and its thinnest dimension is reasonable
+                    thinnest_dimension = np.min(
+                        np.max(pts, axis=1) - np.min(pts, axis=1))
+                    print "And thinnest dimension %f" % thinnest_dimension
+                    if thinnest_dimension >= 0.01 and \
+                       np.all(current_object_pos.T >= np.array([0.4, -0.6, 0.6])) and \
+                       np.all(current_object_pos.T <= np.array([0.7, 0.0, 0.9])):
+                        under_blade_inds.append(body_i)
+                        under_blade_distances.append(np.linalg.norm(end_effector_pos - current_object_pos))
 
             n_clear_objects = len(under_blade_inds)
 
             # What do we *want* to cut?
-            desired_cut_ind = on_table_inds[np.argmax(on_table_heights)]
+            if len(cuttable_inds) == 0:
+                print "NOTHING LEFT TO CUT, ABORTING"
+                raise StopIteration
+
+            desired_cut_ind = cuttable_inds[np.argmax(cuttable_heights)]
 
             # If it's under the blade, keep it there and move everything else
             # out of the way.
