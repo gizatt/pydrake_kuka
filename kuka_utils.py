@@ -332,7 +332,7 @@ class ExperimentWorldBuilder():
         print "Cutting with cutting planes ", cutting_planes
         # Create a mesh programmatically for that cylinder
         cyl = mesh_creation.create_cut_cylinder(
-            radius, height, cutting_planes, sections=8)
+            radius, height, cutting_planes, sections=12)
         cyl.density = 1000.  # Same as water
 
         frame_name = "object_init_frame_%s" % model_name
@@ -631,7 +631,7 @@ class AllFlippedGuard(LeafSystem):
                 self.world_builder.manipuland_body_indices):
             # First check that it's got very low velocity
             i_start = self.rbt.get_body(ind).get_position_start_index()
-            if max(np.abs(v[i_start:(i_start+3)])) >= 0.025:
+            if max(np.abs(v[i_start:(i_start+3)])) >= 0.05:
                 are_all_facing_down = False
                 break
             params = self.world_builder.manipuland_params[k]

@@ -74,10 +74,10 @@ if __name__ == "__main__":
         # position relative to the object" with varying object size and some
         # noise on its pose estimate (which comes in as object pose variation)
         pose_perturb = pose_base.copy()
-        pose_perturb[0:2] += np.random.normal(loc=0., scale=0.05, size=2)
-        pose_perturb[3:6] += np.random.normal(loc=0., scale=np.pi/8., size=3)
-        height = np.random.normal(loc=0.1, scale=0.02)
-        radius = np.random.normal(loc=0.03, scale=0.005)
+        pose_perturb[0:2] += np.random.normal(loc=0., scale=0.0, size=2)
+        pose_perturb[3:6] += np.random.normal(loc=0., scale=0.0, size=3)
+        height = np.random.normal(loc=0.1, scale=0.01)
+        radius = np.random.normal(loc=0.025, scale=0.001)
         rbt, rbt_just_kuka, q0 = world_builder.setup_initial_world(
             n_objects=1, cylinder_poses=[pose_perturb],
             cylinder_cut_dirs=[[[1., 0., 0.]]],
@@ -129,19 +129,22 @@ if __name__ == "__main__":
         # See DynamicFlipPrimitiveParameters in kuka_controllers.py
         # for an explanation of these values
         flipper_params.table_touch_z_threshold = 0.8
-        flipper_params.reach_object_time = 0.3
-        flipper_params.end_flip_time = 0.5
+        flipper_params.reach_object_time = 0.5
+        flipper_params.end_flip_time = 0.8
         flipper_params.fingertip_bury_amount = 0.01
         flipper_params.object_overshoot_distance = 0.05
-        flipper_params.followthrough_distance = 0.3
+        flipper_params.followthrough_distance = 0.2
         flipper_params.followthrough_height = 0.3
 
         # Create a high-level state machine to guide the robot
         # motion...
+        # There's only 1 manipuland, and it's added to the RBT
+        # last, so we can assume its index is the last one.
+        object_id = rbt.get_num_bodies() - 1
         task_planner = builder.AddSystem(
             kuka_controllers.TaskPlannerOnlyFlipping(
                 rbt, q0, world_builder,
-                object_id=rbt.get_num_bodies()-1,
+                object_id=object_id,
                 params=flipper_params))
         builder.Connect(rbplant_sys.state_output_port(),
                         task_planner.robot_state_input_port)
@@ -219,6 +222,24 @@ if __name__ == "__main__":
         print("Final state: ", state.CopyToVector())
         print("SUCCESS: ", success)
         end_time = simulator.get_mutable_context().get_time()
+
+        # Calculate distance from edge of table
+        final_state = simulator.get_mutable_context().\
+            get_mutable_continuous_state_vector()
+        x_final = final_state.CopyToVector()
+        kinsol = rbt.doKinematics(x_final[0:rbt.get_num_positions()])
+        final_object_position = rbt.transformPoints(
+            kinsol, [0., 0., 0.], object_id, 0)[0:2, 0]
+        # Two tables, each 0.7 x 0.7, one at [0., 0.], one at [0.7, 0.]
+        table_half_width = np.array([0.7, 0.35])
+        table_center = np.array([0.7-0.35/2., 0.])
+        table_min = table_center - table_half_width
+        table_max = table_center + table_half_width
+        penalty = np.maximum(table_min - final_object_position,
+                             final_object_position - table_max)
+        print "Position: ", final_object_position, " and penalty: ", penalty
+
+
 
         if args.animate_forever:
             try:
