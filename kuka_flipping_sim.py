@@ -65,7 +65,7 @@ if __name__ == "__main__":
 
     pose_base = np.array([0.65, 0., 0.75, np.pi/2., -np.pi/2., 0.])
 
-    for k in range(10):
+    for k in range(5):
         # Construct the initial robot and its environment
         world_builder = kuka_utils.ExperimentWorldBuilder(with_knife=False)
 
