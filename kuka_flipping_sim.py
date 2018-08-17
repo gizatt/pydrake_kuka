@@ -30,6 +30,7 @@ import kuka_ik
 import kuka_utils
 import cutting_utils
 
+
 if __name__ == "__main__":
     np.set_printoptions(precision=5, suppress=True)
     parser = argparse.ArgumentParser()
@@ -110,11 +111,11 @@ if __name__ == "__main__":
     builder.Connect(hand_controller.get_output_port(0),
                     rbplant_sys.get_input_port(1))
 
-
     # Create a high-level state machine to guide the robot
     # motion...
     task_planner = builder.AddSystem(
-        kuka_controllers.TaskPlannerOnlyFlipping(rbt, q0, world_builder,
+        kuka_controllers.TaskPlannerOnlyFlipping(
+            rbt, q0, world_builder,
             object_id=rbt.get_num_bodies()-1))
     builder.Connect(rbplant_sys.state_output_port(),
                     task_planner.robot_state_input_port)
@@ -122,6 +123,13 @@ if __name__ == "__main__":
                     hand_controller.setpoint_input_port)
     builder.Connect(task_planner.kuka_setpoint_output_port,
                     kuka_controller.setpoint_input_port)
+
+    # Create a guard to end the sim when everything is
+    # flipped.
+    done_guard = builder.AddSystem(
+        kuka_utils.AllFlippedGuard(rbt, world_builder))
+    builder.Connect(rbplant_sys.state_output_port(),
+                    done_guard.robot_state_input_port)
 
     # Hook up loggers for the robot state, the robot setpoints,
     # and the torque inputs.
@@ -170,15 +178,20 @@ if __name__ == "__main__":
     state.SetFromVector(initial_state)
     simulator.get_mutable_context().set_time(t)
 
+    success = False
     try:
         simulator.StepTo(args.duration)
+    except kuka_utils.DoneException:
+        print "Terminated early and succeeded"
+        success = True
     except StopIteration:
-        print "Terminated early"
+        print "Terminated early but did not succeed"
     except RuntimeError as e:
         print "Runtime Error: ", e
         print "Probably NAN in simulation. Terminating early."
 
     print("Final state: ", state.CopyToVector())
+    print("SUCCESS: ", success)
     end_time = simulator.get_mutable_context().get_time()
 
     if args.animate_forever:

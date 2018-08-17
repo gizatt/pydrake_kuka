@@ -325,18 +325,20 @@ class ExperimentWorldBuilder():
             radius, height, cutting_planes, sections=8)
         cyl.density = 1000.  # Same as water
 
+        frame_name = "object_init_frame_%s" % model_name
         self.manipuland_params.append(dict(
                 height=height,
                 radius=radius,
                 cut_dirs=cut_dirs,
-                cut_points=cut_points
+                cut_points=cut_points,
+                frame_name=frame_name
             ))
         # Save it out to a file and add it to the RBT
         object_init_frame = RigidBodyFrame(
-            "object_init_frame_%s" % model_name, rbt.world(),
+            frame_name, rbt.world(),
             np.zeros(3),
             self.magic_rpy_offset)
-
+        rbt.addFrame(object_init_frame)
         if do_convex_decomp:  # more powerful, does a convex decomp
             urdf_dir = "/tmp/%s/" % model_name
             trimesh.io.urdf.export_urdf(cyl, urdf_dir)
@@ -582,3 +584,65 @@ class RgbdCameraMeshcatVisualizer(LeafSystem):
             g.PointCloud(position=points_in_world_frame,
                          color=colors,
                          size=0.005))
+
+
+class DoneException(Exception):
+    def __init__(self):
+        super(DoneException, self).__init__("Task done!")
+
+
+class AllFlippedGuard(LeafSystem):
+    def __init__(self, rbt, world_builder, timestep=0.05):
+        ''' At every timestep, checks if all of the
+            cylinders in the world builder are flipped,
+            and raises a DoneException if this is true. '''
+        LeafSystem.__init__(self)
+        self.set_name("AllFlippedGuard")
+
+        self._DeclarePeriodicPublish(timestep, 0.0)
+        self.rbt = rbt
+        self.world_builder = world_builder
+
+        self.robot_state_input_port = \
+            self._DeclareInputPort(PortDataType.kVectorValued,
+                                   rbt.get_num_positions() +
+                                   rbt.get_num_velocities())
+        self.num_done_checks = 0
+
+    def _DoPublish(self, context, events):
+        x = self.EvalVectorInput(
+                context, self.robot_state_input_port.get_index()).get_value()
+        q = x[0:self.rbt.get_num_positions()]
+        v = x[self.rbt.get_num_positions():]
+        kinsol = self.rbt.doKinematics(q)
+
+        are_all_facing_down = True
+        for k, ind in enumerate(
+                self.world_builder.manipuland_body_indices):
+            # First check that it's got very low velocity
+            i_start = self.rbt.get_body(ind).get_position_start_index()
+            if max(np.abs(v[i_start:(i_start+3)])) >= 0.01:
+                are_all_facing_down = False
+                break
+            params = self.world_builder.manipuland_params[k]
+            cut_dirs = params["cut_dirs"]
+            frame_name = params["frame_name"]
+            are_any_facing_down = False
+            for cut_dir in cut_dirs:
+                cut_dir_world = self.rbt.relativeTransform(
+                    kinsol, ind, 0)[0:3, 0:3].T.dot(cut_dir)
+                # Cut dir appears to point opposite the
+                # actual cut section...
+                if cut_dir_world[2] > 0:
+                    are_any_facing_down = True
+                    break
+            if not are_any_facing_down:
+                are_all_facing_down = False
+                break
+
+        if are_all_facing_down:
+            self.num_done_checks += 1
+            if self.num_done_checks > 4:
+                raise DoneException()
+        else:
+            self.num_done_checks = 0
