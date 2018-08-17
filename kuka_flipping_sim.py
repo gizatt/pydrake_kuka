@@ -74,10 +74,10 @@ if __name__ == "__main__":
         # position relative to the object" with varying object size and some
         # noise on its pose estimate (which comes in as object pose variation)
         pose_perturb = pose_base.copy()
-        pose_perturb[0:2] += (np.random.random(2)-0.5)*0.1
-        pose_perturb[3:6] += (np.random.random(3))*np.pi/4.
-        height = 0.1 + np.random.random() * 0.05
-        radius = 0.02 + np.random.random() * 0.01
+        pose_perturb[0:2] += np.random.normal(loc=0., scale=0.05, size=2)
+        pose_perturb[3:6] += np.random.normal(loc=0., scale=np.pi/8., size=3)
+        height = np.random.normal(loc=0.1, scale=0.02)
+        radius = np.random.normal(loc=0.03, scale=0.005)
         rbt, rbt_just_kuka, q0 = world_builder.setup_initial_world(
             n_objects=1, cylinder_poses=[pose_perturb],
             cylinder_cut_dirs=[[[1., 0., 0.]]],
