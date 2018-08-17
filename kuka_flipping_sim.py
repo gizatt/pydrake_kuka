@@ -130,7 +130,7 @@ if __name__ == "__main__":
         # for an explanation of these values
         flipper_params.table_touch_z_threshold = 0.8
         flipper_params.reach_object_time = 0.5
-        flipper_params.end_flip_time = 0.8
+        flipper_params.end_flip_time = 1.0
         flipper_params.fingertip_bury_amount = 0.01
         flipper_params.object_overshoot_distance = 0.05
         flipper_params.followthrough_distance = 0.2
@@ -238,8 +238,7 @@ if __name__ == "__main__":
         penalty = np.maximum(table_min - final_object_position,
                              final_object_position - table_max)
         print "Position: ", final_object_position, " and penalty: ", penalty
-
-
+        print "Best flip score: ", done_guard.best_flip_score
 
         if args.animate_forever:
             try:

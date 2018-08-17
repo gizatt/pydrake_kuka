@@ -597,12 +597,15 @@ class RgbdCameraMeshcatVisualizer(LeafSystem):
 
 
 class DoneException(Exception):
-    def __init__(self):
+    ''' Flip score is defined as the dot product of the
+        cut surface normal with the downward vector. '''
+    def __init__(self, best_flip_score):
         super(DoneException, self).__init__("Task done!")
+        self.best_flip_score = best_flip_score
 
 
 class AllFlippedGuard(LeafSystem):
-    def __init__(self, rbt, world_builder, timestep=0.05):
+    def __init__(self, rbt, world_builder, timestep=0.01):
         ''' At every timestep, checks if all of the
             cylinders in the world builder are flipped,
             and raises a DoneException if this is true. '''
@@ -618,6 +621,7 @@ class AllFlippedGuard(LeafSystem):
                                    rbt.get_num_positions() +
                                    rbt.get_num_velocities())
         self.num_done_checks = 0
+        self.best_flip_score = -1.
 
     def _DoPublish(self, context, events):
         x = self.EvalVectorInput(
@@ -629,11 +633,6 @@ class AllFlippedGuard(LeafSystem):
         are_all_facing_down = True
         for k, ind in enumerate(
                 self.world_builder.manipuland_body_indices):
-            # First check that it's got very low velocity
-            i_start = self.rbt.get_body(ind).get_position_start_index()
-            if max(np.abs(v[i_start:(i_start+3)])) >= 0.05:
-                are_all_facing_down = False
-                break
             params = self.world_builder.manipuland_params[k]
             cut_dirs = params["cut_dirs"]
             frame_name = params["frame_name"]
@@ -643,7 +642,12 @@ class AllFlippedGuard(LeafSystem):
                     kinsol, ind, 0)[0:3, 0:3].T.dot(cut_dir)
                 # Cut dir appears to point opposite the
                 # actual cut section...
-                if cut_dir_world[2] > 0:
+                self.best_flip_score = max(self.best_flip_score,
+                                           cut_dir_world[2])
+                # Also check that it's got very low velocity
+                i_start = self.rbt.get_body(ind).get_position_start_index()
+                if max(np.abs(v[i_start:(i_start+3)])) < 0.05 and \
+                        cut_dir_world[2] > 0:
                     are_any_facing_down = True
                     break
             if not are_any_facing_down:
@@ -653,6 +657,6 @@ class AllFlippedGuard(LeafSystem):
         if are_all_facing_down:
             self.num_done_checks += 1
             if self.num_done_checks > 4:
-                raise DoneException()
+                raise DoneException(self.best_flip_score)
         else:
             self.num_done_checks = 0
