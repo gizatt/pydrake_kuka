@@ -106,7 +106,15 @@ class ExperimentWorldBuilder():
         for key in model_instance_map.keys():
             self.model_index_dict[key] = model_instance_map[key]
 
-    def setup_initial_world(self, n_objects):
+    def setup_initial_world(self, n_objects,
+                            cylinder_poses=[],
+                            cylinder_cut_dirs=[],
+                            cylinder_cut_points=[]):
+        # Cut dirs and points should be lists of lists of lists
+        # (for every cylinder, supply a list of 3-vectors)
+        if len(cylinder_cut_dirs) != len(cylinder_cut_points):
+            raise ValueError("Must supply corresponding cut dirs "
+                             "and points pairs.")
         # Construct the initial robot and its environment
         rbt = RigidBodyTree()
         self.setup_kuka(rbt)
@@ -135,20 +143,31 @@ class ExperimentWorldBuilder():
         # Add objects + make random initial poses
         q0 = np.zeros(rbt.get_num_positions() + 6*n_objects)
         q0[0:rbt_just_kuka.get_num_positions()] = q0_kuka
+
         for k in range(n_objects):
-            self.add_cut_cylinder_to_tabletop(rbt,
-                                              cut_dirs=[], cut_points=[])
+            if len(cylinder_cut_points) > 0:
+                self.add_cut_cylinder_to_tabletop(
+                    rbt, cut_dirs=cylinder_cut_dirs[k],
+                    cut_points=cylinder_cut_points[k])
+            else:
+                self.add_cut_cylinder_to_tabletop(rbt, cut_dirs=[],
+                                                  cut_points=[])
             radius = self.manipuland_params[-1]["radius"]
             new_body = rbt.get_body(self.manipuland_body_indices[-1])
 
-            # Remember to reverse effects of self.magic_rpy_offset
-            new_pos = self.magic_rpy_rotmat.T.dot(np.array(
-                        [0.4 + np.random.random()*0.2,
-                         -0.2 + np.random.random()*0.4,
-                         self.table_top_z_in_world+radius+0.001]))
+            if len(cylinder_poses) > 0:
+                new_pos = cylinder_poses[k][0:3]
+                new_rot = cylinder_poses[k][3:6]
+            else:
+                new_pos = np.array([
+                    0.4 + np.random.random()*0.2,
+                    -0.2 + np.random.random()*0.4,
+                    self.table_top_z_in_world+radius+0.001])
+                new_rot = np.random.random(3) * np.pi * 2.
 
-            new_rot = (np.random.random(3) * np.pi * 2.) - \
-                self.magic_rpy_offset
+            # Remember to reverse effects of self.magic_rpy_offset
+            new_pos = self.magic_rpy_rotmat.T.dot(new_pos)
+            new_rot -= self.magic_rpy_offset
             q0[range(new_body.get_position_start_index(),
                      new_body.get_position_start_index()+6)] = np.hstack([
                         new_pos, new_rot])
@@ -303,7 +322,7 @@ class ExperimentWorldBuilder():
         print "Cutting with cutting planes ", cutting_planes
         # Create a mesh programmatically for that cylinder
         cyl = mesh_creation.create_cut_cylinder(
-            radius, height, cutting_planes, sections=6)
+            radius, height, cutting_planes, sections=8)
         cyl.density = 1000.  # Same as water
 
         self.manipuland_params.append(dict(

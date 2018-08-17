@@ -453,6 +453,173 @@ class IdlePrimitive(TaskPrimitive):
         return 1.
 
 
+class DynamicFlipPrimitiveParameters():
+    def __init__(self, rbt,
+                 fingertip_point=np.array([0., 0.03, 0.])):
+        self.fingertip_frame = rbt.FindBody("right_finger").get_body_index()
+        self.fingertip_point = fingertip_point
+        self.table_touch_z_threshold = 0.8
+
+        # Touch and flip trajectory:
+        # Touches object at reach_time at object centroid
+        #   plus an overshoot distance
+        # then follows through in the same direction
+        # with specified length and height
+        self.reach_object_time = 0.5
+        self.end_flip_time = 1.0
+        self.start_flip_hand_angle = 0.0
+        self.end_flip_hand_angle = -np.pi/4
+        self.fingertip_bury_amount = 0.01
+        self.object_overshoot_distance = 0.05
+        self.followthrough_distance = 0.2
+        self.followthrough_height = 0.2
+
+
+class DynamicFlipPrimitive(TaskPrimitive):
+    ''' The flip primitive operates in three stages,
+        all of which involve changing pose goals for
+        a point on the fingertip:
+            - Bring the fingertip down until it
+              contacts the table surface
+            - Slide over and flip the object with
+              a parameterized open loop behavior
+        with the hope that if the fingertip
+        trajectories during approach and liftoff are
+        chosen correctly and performed at the right
+        speed, it'll generally flip the object. '''
+
+    def __init__(self, rbt, q_nom, target_object_id, params=None):
+        if params is None:
+            params = DynamicFlipPrimitiveParameters(rbt)
+        TaskPrimitive.__init__(self)
+        self.rbt = rbt
+        self.q_nom = q_nom
+        self.params = params
+        self.target_object_id = target_object_id
+        self.object_com = rbt.get_body(
+            self.target_object_id).get_center_of_mass()
+
+        self.current_function_name = "approach table"
+        self._RegisterFunction(
+            "approach table",
+            self.ApproachTable)
+        self._RegisterTransition("approach table",
+                                 "slide and flip object",
+                                 self.DidFingerTouchTable)
+        self._RegisterFunction(
+            "slide and flip object",
+            self.SlideAndFlipObject)
+
+        # Prototypical setpoint for the kuka,
+        # with impedency control gains we'll use for
+        # all manipulations here
+        self.base_setpoint = InstantaneousKukaControllerSetpoint()
+        self.base_setpoint.Ka = 0.001
+        self.base_setpoint.Kq = 0.001  # very weak, just regularizing
+        self.base_setpoint.Kv = 10     # Resist moving super fast
+        self.base_setpoint.Kee_v = 10000       # For EE velocity control
+        self.base_setpoint.Kee_xyzd = 10.    # For EE orientation stabilization
+        self.base_setpoint.Kee_xyz = 100000.     # For EE orientation control
+        self.base_setpoint.Kee_pt = 2000.     # For EE location control
+        self.base_setpoint.q_des = self.q_nom[0:7]
+        self.base_setpoint.v_des = np.zeros(7)
+        self.base_setpoint.ee_frame = self.params.fingertip_frame
+        self.base_setpoint.ee_pt = self.params.fingertip_point
+        self.base_setpoint.ee_v_des = np.array([0., 0., 0.0])
+
+        self.flip_trajectory = None
+        self.flip_angle_trajectory = None
+
+    def _GetFingertipPosition(self, kinsol):
+        return self.rbt.transformPoints(
+            kinsol, self.params.fingertip_point,
+            self.params.fingertip_frame, 0)
+
+    def _GetObjectPosition(self, kinsol):
+        return self.rbt.transformPoints(
+            kinsol, self.object_com,
+            self.target_object_id, 0)
+
+    def _GetObjectJacobian(self, kinsol):
+        return self.rbt.transformPointsJacobian(
+            kinsol, self.object_com,
+            self.target_object_id, 0)
+
+    def _ApplyOrientToObjectSetpoint(self, kinsol, setpoint_object):
+        # Object +z is "up", +x and +y are potential cut directions.
+        # Find the direction of the object that is not +z, and is
+        # orthogonal to world +z, with a cross product
+        object_pz_world = self.rbt.transformPoints(
+            kinsol, [0., 0., 0.] + np.array([0., 0., 1.]),
+            self.target_object_id, 0)
+        approach_dir = np.cross(np.array([[0., 0., 1.]]), object_pz_world.T)
+        setpoint_object.ee_z_des = approach_dir
+
+    def ApproachTable(self, context_info, setpoint_object,
+                      gripper_setpoint, knife_setpoint):
+        setpoint_object.Copy(self.base_setpoint)
+        kinsol = self.rbt.doKinematics(
+            context_info.x[:self.rbt.get_num_positions()])
+        self._ApplyOrientToObjectSetpoint(kinsol, setpoint_object)
+        setpoint_object.ee_v_des = np.array([0., 0., -1.0])
+        setpoint_object.ee_y_des = np.array([0., 0., -1.0]) # point finger down
+        gripper_setpoint[:] = 0.0
+        knife_setpoint[:] = np.pi/2.
+
+    def _GenerateFlipTrajectory(self, context_info, kinsol):
+        times = np.array(
+            [0., self.params.reach_object_time, self.params.end_flip_time])
+        times += context_info.t
+        ee_pt = self._GetFingertipPosition(kinsol)
+        object_pt = self._GetObjectPosition(kinsol)
+        approach_vector = object_pt - ee_pt
+        approach_vector /= np.linalg.norm(approach_vector)
+        end_pt = object_pt.copy()
+        end_pt[0:2] += \
+            approach_vector[0:2]*self.params.followthrough_distance
+        end_pt[2] += self.params.followthrough_height
+        object_pt[0:2] += self.params.object_overshoot_distance*approach_vector[0:2]
+        object_pt[2] -= self.params.fingertip_bury_amount
+        positions = np.vstack([ee_pt[:, 0], object_pt[:, 0], end_pt[:, 0]]).T
+        self.flip_trajectory = PiecewisePolynomial.Pchip(
+            times, positions, True)
+
+    def SlideAndFlipObject(self, context_info, setpoint_object,
+                           gripper_setpoint, knife_setpoint):
+        kinsol = self.rbt.doKinematics(
+            context_info.x[:self.rbt.get_num_positions()])
+        if self.flip_trajectory is None:
+            self._GenerateFlipTrajectory(context_info, kinsol)
+
+        setpoint_object.Copy(self.base_setpoint)
+        self._ApplyOrientToObjectSetpoint(kinsol, setpoint_object)
+        setpoint_object.ee_pt_des = self.flip_trajectory.value(context_info.t)
+        ee_v_des = self.flip_trajectory.derivative(1).value(context_info.t)
+        setpoint_object.ee_v_des = ee_v_des.copy()
+        # Orient the axis of the finger to point perpendicular to the motion,
+        # while otherwise maintaining pretty upright
+        if np.linalg.norm(ee_v_des) > 0.05:
+            ee_v_des /= np.linalg.norm(ee_v_des)
+            perp_to_motion_laterally = np.cross(
+                ee_v_des[:, 0], np.array([0., 0., 1.]))
+            setpoint_object.ee_y_des = np.cross(
+                ee_v_des[:, 0], perp_to_motion_laterally)
+
+        gripper_setpoint[:] = 0.0
+        knife_setpoint[:] = np.pi/2.
+
+    def DidFingerTouchTable(self, context_info):
+        kinsol = self.rbt.doKinematics(
+            context_info.x[:self.rbt.get_num_positions()])
+        pt = self._GetFingertipPosition(kinsol)
+        # TODO pipe in real contact info
+        return pt[2] <= self.params.table_touch_z_threshold
+
+    @staticmethod
+    def CalcExpectedCost(self, context_info, rbt):
+        return 1.
+
+
 class CutPrimitive(TaskPrimitive):
     def __init__(self, rbt, q_nom):
         TaskPrimitive.__init__(self)
@@ -697,6 +864,85 @@ class MoveObjectPrimitive(TaskPrimitive):
     @staticmethod
     def CalcExpectedCost(context_info, rbt):
         return 1.
+
+
+class TaskPlannerOnlyFlipping(LeafSystem):
+    def __init__(self, rbt_full, q_nom, world_builder, object_id):
+        LeafSystem.__init__(self)
+        self.set_name("Task Planner For Flipping")
+
+        self.rbt = rbt_full
+        self.world_builder = world_builder
+        self.q_nom = np.array([-0.18, -1., 0.12, -1.89, 0.1, 1.3, 0.38, 0.0, 0.0])
+        self.nq_full = rbt_full.get_num_positions()
+        self.nv_full = rbt_full.get_num_velocities()
+        self.nu_full = rbt_full.get_num_actuators()
+
+        self.robot_state_input_port = \
+            self._DeclareInputPort(PortDataType.kVectorValued,
+                                   self.nq_full + self.nv_full)
+
+        self._DeclareDiscreteState(1)
+        self._DeclarePeriodicDiscreteUpdate(period_sec=0.01)
+        # TODO set default state somehow better. Requires new
+        # bindings to override AllocateDiscreteState or something else.
+        self.initialized = False
+        self.current_primitive = DynamicFlipPrimitive(self.rbt, q_nom, object_id)
+        self.kuka_setpoint = self._DoAllocKukaSetpointOutput()
+        # Put these in arrays so we can more easily pass by reference into
+        # CalcSetpointsOutput
+        self.gripper_setpoint = np.array([0.])
+        self.knife_setpoint = np.array([np.pi/2.])
+
+        # TODO The controller takes full state in, even though it only
+        # controls the Kuka... that should be tidied up.
+        self.kuka_setpoint_output_port = \
+            self._DeclareAbstractOutputPort(
+                self._DoAllocKukaSetpointOutput,
+                self._DoCalcKukaSetpointOutput)
+
+        self.hand_setpoint_output_port = \
+            self._DeclareVectorOutputPort(BasicVector(1),
+                                          self._DoCalcHandSetpointOutput)
+        self.knife_setpoint_output_port = \
+            self._DeclareVectorOutputPort(BasicVector(1),
+                                          self._DoCalcKnifeSetpointOutput)
+
+        self._DeclarePeriodicPublish(0.01, 0.0)
+
+    def _DoCalcDiscreteVariableUpdates(self, context, events, discrete_state):
+        # Call base method to ensure we do not get recursion.
+        LeafSystem._DoCalcDiscreteVariableUpdates(
+            self, context, events, discrete_state)
+
+        state = discrete_state. \
+            get_mutable_vector().get_mutable_value()
+
+        t = context.get_time()
+        x_robot_full = self.EvalVectorInput(
+            context, self.robot_state_input_port.get_index()).get_value()
+
+        kinsol = self.rbt.doKinematics(x_robot_full[0:self.rbt.get_num_positions()])
+
+        context_info = TaskPrimitiveContextInfo(t, x_robot_full)
+        self.current_primitive.CalcSetpointsOutput(
+            context_info, self.kuka_setpoint.get_mutable_value(),
+            self.gripper_setpoint, self.knife_setpoint)
+
+    def _DoAllocKukaSetpointOutput(self):
+        return AbstractValue.Make(InstantaneousKukaControllerSetpoint())
+
+    def _DoCalcKukaSetpointOutput(self, context, y_data):
+        y_data.SetFrom(self.kuka_setpoint)
+
+    def _DoCalcHandSetpointOutput(self, context, y_data):
+        state = context.get_discrete_state_vector().get_value()
+        y_data.get_mutable_value()[:] = self.gripper_setpoint
+
+    def _DoCalcKnifeSetpointOutput(self, context, y_data):
+        state = context.get_discrete_state_vector().get_value()
+        y_data.get_mutable_value()[:] = self.knife_setpoint
+
 
 class TaskPlanner(LeafSystem):
 
