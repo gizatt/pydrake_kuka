@@ -9,6 +9,7 @@ from pydrake.all import (
     RigidBodyTree
 )
 
+
 class CutException(Exception):
     def __init__(self, cut_body_index, cut_pt, cut_normal):
         # Call the base class constructor with the parameters it needs

@@ -458,25 +458,44 @@ class DynamicFlipPrimitiveParameters():
                  fingertip_point=np.array([0., 0.03, 0.])):
         self.fingertip_frame = rbt.FindBody("right_finger").get_body_index()
         self.fingertip_point = fingertip_point
-        self.table_touch_z_threshold = 0.8
 
-        # Touch and flip trajectory:
-        # Touches object at reach_time at object centroid
-        #   plus an overshoot distance
-        # then follows through in the same direction
-        # with specified length and height
-        self.reach_object_time = 0.5
-        self.end_flip_time = 1.0
-        self.start_flip_hand_angle = 0.0
-        self.end_flip_hand_angle = -np.pi/4
-        self.fingertip_bury_amount = 0.01
-        self.object_overshoot_distance = 0.05
-        self.followthrough_distance = 0.2
-        self.followthrough_height = 0.2
+        # Table contact is detected by comparing the z position
+        # of the fingertip with this number. Having it too
+        # low will cause the robot to really grind into the table,
+        # and having it too high will have the robot hover over the
+        # table.
+        self.table_touch_z_threshold = 0.8  # meters, [0.7, 0.9]
+
+        # Touch and flip trajectory: after touching the table,
+        # the robot slides its fingertip directly to the object,
+        # and then follows through with a rotation of its hand
+        # and a follow-through movement of the fingertip.
+        #
+        # In particular: it moves to the "touch" location by
+        # `reach_object_time`, and reaches its "final" location
+        # at `end_flip_time`. It aims to keep the fingertip
+        # `fingertip_bury_amount` below the z-level of the
+        # object for the sliding phase. Instead of moving exactly
+        # to the object position in the sliding phase, it moes
+        # `object_overshoot_distance` past it (in the direction
+        # of approach). It continues moving `followthrough_distance`
+        # laterally and `followthrough_height` vertically for the
+        # followthrough / flipping movement.
+        self.reach_object_time = 0.3        # seconds, [0., 1.]
+        self.end_flip_time = 0.5            # seconds, [0., 1.]
+        self.fingertip_bury_amount = 0.01   # meters, [-0.1, 0.1]
+        self.object_overshoot_distance = 0.05  # meters, [-0.1, 0.1]
+        self.followthrough_distance = 0.3      # meters, [0.0, 0.5]
+        self.followthrough_height = 0.3        # meters, [0.0, 0.5]
+
+        # The controller gains, set below in DynamicFlipPrimitive's
+        # constructor, could also be considered params and lumped in here.
+        # But this set on its own ought to be enough to massively influence
+        # the efficacy of this policy.
 
 
 class DynamicFlipPrimitive(TaskPrimitive):
-    ''' The flip primitive operates in three stages,
+    ''' The flip primitive operates in two stages,
         all of which involve changing pose goals for
         a point on the fingertip:
             - Bring the fingertip down until it
@@ -867,7 +886,8 @@ class MoveObjectPrimitive(TaskPrimitive):
 
 
 class TaskPlannerOnlyFlipping(LeafSystem):
-    def __init__(self, rbt_full, q_nom, world_builder, object_id):
+    def __init__(self, rbt_full, q_nom, world_builder, object_id,
+                 params=None):
         LeafSystem.__init__(self)
         self.set_name("Task Planner For Flipping")
 
@@ -887,7 +907,8 @@ class TaskPlannerOnlyFlipping(LeafSystem):
         # TODO set default state somehow better. Requires new
         # bindings to override AllocateDiscreteState or something else.
         self.initialized = False
-        self.current_primitive = DynamicFlipPrimitive(self.rbt, q_nom, object_id)
+        self.current_primitive = DynamicFlipPrimitive(
+            self.rbt, q_nom, object_id, params)
         self.kuka_setpoint = self._DoAllocKukaSetpointOutput()
         # Put these in arrays so we can more easily pass by reference into
         # CalcSetpointsOutput

@@ -109,7 +109,9 @@ class ExperimentWorldBuilder():
     def setup_initial_world(self, n_objects,
                             cylinder_poses=[],
                             cylinder_cut_dirs=[],
-                            cylinder_cut_points=[]):
+                            cylinder_cut_points=[],
+                            cylinder_heights=[],
+                            cylinder_radiuses=[]):
         # Cut dirs and points should be lists of lists of lists
         # (for every cylinder, supply a list of 3-vectors)
         if len(cylinder_cut_dirs) != len(cylinder_cut_points):
@@ -145,10 +147,18 @@ class ExperimentWorldBuilder():
         q0[0:rbt_just_kuka.get_num_positions()] = q0_kuka
 
         for k in range(n_objects):
+            r = None
+            h = None
+            if len(cylinder_radiuses) > 0:
+                r = cylinder_radiuses[k]
+            if len(cylinder_heights) > 0:
+                h = cylinder_heights[k]
+
             if len(cylinder_cut_points) > 0:
                 self.add_cut_cylinder_to_tabletop(
                     rbt, cut_dirs=cylinder_cut_dirs[k],
-                    cut_points=cylinder_cut_points[k])
+                    cut_points=cylinder_cut_points[k],
+                    height=h, radius=r)
             else:
                 self.add_cut_cylinder_to_tabletop(rbt, cut_dirs=[],
                                                   cut_points=[])
@@ -621,7 +631,7 @@ class AllFlippedGuard(LeafSystem):
                 self.world_builder.manipuland_body_indices):
             # First check that it's got very low velocity
             i_start = self.rbt.get_body(ind).get_position_start_index()
-            if max(np.abs(v[i_start:(i_start+3)])) >= 0.01:
+            if max(np.abs(v[i_start:(i_start+3)])) >= 0.025:
                 are_all_facing_down = False
                 break
             params = self.world_builder.manipuland_params[k]
