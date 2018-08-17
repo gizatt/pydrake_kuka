@@ -16,7 +16,7 @@ if [ ! $exit_status -eq 0 ]; then
 fi
 
 # Launch a complete robot context and execute some canned movement.
-DISPLAY=:100 python kuka_flipping_sim.py -T 5. --test
+DISPLAY=:100 python kuka_flipping_sim.py -T 3. --test
 exit_status=$?
 if [ ! $exit_status -eq 0 ]; then
   echo "Error code in kuka_pydrake_sim.py: " $exit_status

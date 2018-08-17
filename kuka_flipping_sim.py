@@ -37,7 +37,7 @@ if __name__ == "__main__":
     parser.add_argument("-T", "--duration",
                         type=float,
                         help="Duration to run sim.",
-                        default=1000.0)
+                        default=3.0)
     parser.add_argument("--test",
                         action="store_true",
                         help="Help out CI by launching a meshcat server for "
