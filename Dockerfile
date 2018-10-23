@@ -4,7 +4,7 @@ ARG DRAKE_URL
 
 RUN apt-get update
 RUN apt install -y sudo graphviz python-pip curl git openscad tmux screen
-RUN pip install pip jupyter==4.10 graphviz meshcat numpy trimesh pyglet
+RUN pip install pip ipykernel==4.10.0 ipython==5.5.0 jupyter graphviz meshcat numpy trimesh pyglet
 RUN curl -o drake.tar.gz $DRAKE_URL && sudo tar -xzf drake.tar.gz -C /opt
 RUN yes | sudo /opt/drake/share/drake/setup/install_prereqs
 RUN git clone -b mrbv_tweaks https://github.com/gizatt/underactuated /underactuated
