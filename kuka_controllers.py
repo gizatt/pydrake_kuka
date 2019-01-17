@@ -103,7 +103,9 @@ class InstantaneousKukaController(LeafSystem):
                                    rbt.get_num_velocities())
 
         self.setpoint_input_port = \
-            self._DeclareInputPort(PortDataType.kAbstractValued, 0)
+            self._DeclareAbstractInputPort(
+                "setpoint_input_port",
+                AbstractValue.Make(InstantaneousKukaControllerSetpoint()))
 
         self._DeclareDiscreteState(self.nu)
         self._DeclarePeriodicDiscreteUpdate(period_sec=control_period)

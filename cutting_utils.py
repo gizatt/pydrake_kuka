@@ -8,6 +8,8 @@ from pydrake.all import (
     RigidBodyPlant,
     RigidBodyTree
 )
+from pydrake.multibody.rigid_body_plant import ContactResults
+
 
 class CutException(Exception):
     def __init__(self, cut_body_index, cut_pt, cut_normal):
@@ -53,8 +55,9 @@ class CuttingGuard(LeafSystem):
                                    rbt.get_num_positions() +
                                    rbt.get_num_velocities())
         self.contact_results_input_port = \
-            self._DeclareInputPort(PortDataType.kAbstractValued,
-                                   rbp.contact_results_output_port().size())
+            self._DeclareAbstractInputPort(
+                "contact_results_input_port",
+                AbstractValue.Make(ContactResults()))
 
     def _DoPublish(self, context, events):
         contact_results = self.EvalAbstractInput(
