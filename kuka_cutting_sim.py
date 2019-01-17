@@ -158,7 +158,7 @@ if __name__ == "__main__":
         # and the torque inputs.
         def log_output(output_port, rate):
             logger = builder.AddSystem(SignalLogger(output_port.size()))
-            logger._DeclarePeriodicPublish(1. / rate, 0.0)
+            logger.set_publish_period(1. / rate)
             builder.Connect(output_port, logger.get_input_port(0))
             return logger
         state_log = log_output(rbplant_sys.get_output_port(0), 60.)
@@ -223,7 +223,6 @@ if __name__ == "__main__":
             print "Runtime Error: ", e
             print "Probably NAN in simulation. Terminating early."
 
-        print state_log.sample_times(), state_log.data()
         sim_slices.append((rbt, PiecewisePolynomial.FirstOrderHold(
                             #  Discard first knot, as it's repeated
                             state_log.sample_times()[1:],
