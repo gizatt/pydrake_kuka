@@ -510,8 +510,11 @@ class RgbdCameraMeshcatVisualizer(LeafSystem):
         self.prefix = prefix
 
         self.camera_input_port = \
-            self._DeclareInputPort(PortDataType.kAbstractValued,
-                                   camera.depth_image_output_port().size())
+            self._DeclareAbstractInputPort(
+                "depth_im",
+                AbstractValue.Make(Image[PixelType.kDepth32F](
+                    self.camera.depth_camera_info().width(),
+                    self.camera.depth_camera_info().height())))
         self.state_input_port = \
             self._DeclareInputPort(PortDataType.kVectorValued,
                                    rbt.get_num_positions() +
