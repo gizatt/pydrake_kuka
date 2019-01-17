@@ -223,6 +223,7 @@ if __name__ == "__main__":
             print "Runtime Error: ", e
             print "Probably NAN in simulation. Terminating early."
 
+        print state_log.sample_times(), state_log.data()
         sim_slices.append((rbt, PiecewisePolynomial.FirstOrderHold(
                             #  Discard first knot, as it's repeated
                             state_log.sample_times()[1:],
