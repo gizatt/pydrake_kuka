@@ -3,10 +3,10 @@ FROM ubuntu:18.04
 ARG DRAKE_URL
 
 RUN apt-get update
-RUN apt install -y software-properties-common
+RUN apt install -qqy --no-install-recommends software-properties-common
 RUN add-apt-repository ppa:openscad/releases
 RUN apt-get update
-RUN apt install -y sudo graphviz python-pip curl git openscad tmux screen
+RUN apt install -qqy --no-install-recommends sudo graphviz python-pip curl git openscad tmux screen
 RUN pip install pip ipykernel==4.10.0 IPython==5.0 jupyter graphviz meshcat numpy trimesh pyglet
 RUN curl -o drake.tar.gz $DRAKE_URL && sudo tar -xzf drake.tar.gz -C /opt
 RUN yes | sudo /opt/drake/share/drake/setup/install_prereqs
