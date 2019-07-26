@@ -1,6 +1,6 @@
 language: python
 python:
-  - 2.7
+  - 3.6
 
 sudo: false
 
@@ -14,9 +14,9 @@ services:
 env:
   global:
   - CONDA_DEPS="pytest numpy trimesh pyglet"
-  - PYTHONPATH="$HOME/underactuated:/opt/drake/lib/python2.7/site-packages"
+  - PYTHONPATH="$HOME/underactuated:/opt/drake/lib/python3.6/site-packages"
   matrix:
-  - DRAKE_URL="https://drake-packages.csail.mit.edu/drake/nightly/drake-latest-xenial.tar.gz"
+  - DRAKE_URL="https://drake-packages.csail.mit.edu/drake/nightly/drake-latest-bionic.tar.gz"
 
 install:
   - python docker_build.py --drake_url=$DRAKE_URL
