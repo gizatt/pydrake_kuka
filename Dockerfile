@@ -2,6 +2,8 @@ FROM ubuntu:18.04
 
 ARG DRAKE_URL
 
+RUN apt-get update
+RUN apt install -y software-properties-common
 RUN add-apt-repository ppa:openscad/releases
 RUN apt-get update
 RUN apt install -y sudo graphviz python-pip curl git openscad tmux screen
