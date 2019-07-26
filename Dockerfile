@@ -2,6 +2,7 @@ FROM ubuntu:18.04
 
 ARG DRAKE_URL
 
+RUN add-apt-repository ppa:openscad/releases
 RUN apt-get update
 RUN apt install -y sudo graphviz python-pip curl git openscad tmux screen
 RUN pip install pip ipykernel==4.10.0 IPython==5.0 jupyter graphviz meshcat numpy trimesh pyglet
