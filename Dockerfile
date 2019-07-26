@@ -2,6 +2,7 @@ FROM ubuntu:18.04
 
 ARG DRAKE_URL
 
+ENV DEBIAN_FRONTEND=noninteractive 
 RUN apt-get update
 RUN apt install -qqy --no-install-recommends software-properties-common
 RUN add-apt-repository ppa:openscad/releases
